@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Airtime Heating Cooling and Air Dashboard</title>
+  <link rel="stylesheet" href="../../styles.css">
+</head>
+<body>
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <img class="brand-logo" src="../../assets/airtime-logo.svg" alt="Airtime Heating Cooling and Air">
+    </div>
+    <nav class="nav" aria-label="Primary">
+      <button class="nav-item active" data-page="dashboard" data-tab="overview"><span data-icon="home"></span>Dashboard</button>
+      <button class="nav-item" data-page="reviews"><span data-icon="star"></span>Reviews</button>
+      <button class="nav-item" data-page="auto"><span data-icon="bot"></span>Auto Respond</button>
+      <div class="nav-section">Grow</div>
+      <button class="nav-item has-children" data-page="campaign-insights"><span data-icon="send"></span>Campaigns<i></i></button>
+      <div class="subnav" data-parent="campaign-insights">
+        <button data-page="invitees">Invites</button>
+        <button data-page="request-reviews">Request Reviews</button>
+      </div>
+      <button class="nav-item has-children" data-page="feedback-forms"><span data-icon="clipboard"></span>Review Tools<i></i></button>
+      <div class="subnav" data-parent="feedback-forms">
+        <button data-page="feedback-forms">Feedback Forms</button>
+        <button data-page="qr-codes">QR Codes</button>
+      </div>
+      <div class="nav-section">Display</div>
+      <button class="nav-item has-children" data-page="social-proof"><span data-icon="share"></span>Social Proof<i></i></button>
+      <div class="nav-section">Connect</div>
+      <button class="nav-item has-children" data-page="integrations"><span data-icon="link"></span>Integrations<i></i></button>
+      <div class="nav-section">Manage</div>
+      <button class="nav-item has-children" data-page="settings"><span data-icon="settings"></span>Settings<i></i></button>
+      <button class="nav-item" data-page="help"><span data-icon="help"></span>Help</button>
+    </nav>
+    <button class="invite-fixed">Send Invites <span data-icon="paper"></span></button>
+  </aside>
+
+  <div class="app">
+    <header class="topbar">
+      <button class="menu-toggle" id="menuToggle" aria-label="Open menu"><span data-icon="menu"></span></button>
+      <div></div>
+      <button class="icon-button" aria-label="Search"><span data-icon="search"></span></button>
+      <img class="mini-logo" src="../../assets/airtime-logo.svg" alt="Airtime Heating Cooling and Air">
+    </header>
+    <main id="appContent" class="content"></main>
+    <footer>Airtime Heating Cooling and Air 2026</footer>
+  </div>
+
+  <script src="../../app.js"></script>
+</body>
+</html>
+
