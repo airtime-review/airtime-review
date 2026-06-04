@@ -425,9 +425,6 @@ function blueHero() {
 
 function googleInsights() {
   const perf = getPerformanceSummary();
-  const empty = `<div class="card card-pad section empty-inline">
-    Waiting for Google Business Profile analytics sync. Once Google approves API access and rows are added to <strong>gbp_daily_metrics</strong>, this section will show real impressions, calls, directions, and website clicks.
-  </div>`;
   return `<section class="section">
     <div class="section-title"><div class="soft-icon blue" style="width:34px;height:34px">G</div><div><h2>Google Business Profile Insights</h2><p>How customers find and interact with your business on Google</p></div></div>
     <div class="grid stat-grid">
@@ -436,7 +433,22 @@ function googleInsights() {
       ${smallStat("DIRECTIONS", formatNumber(perf.directions))}
       ${smallStat("WEBSITE CLICKS", formatNumber(perf.websiteClicks))}
     </div>
-    ${perf.hasData ? `<div class="card card-pad section"><h3>Performance Trends <span class="badge" style="float:right">${state.period}</span></h3>${performanceTable()}</div>` : empty}
+    <div class="card card-pad section">
+      <h3>Performance Trends <span class="badge" style="float:right">${state.period}</span></h3>
+      <div class="legend"><span><i class="dot" style="background:#6b6cf6"></i>Impressions</span><span><i class="dot" style="background:#ff4747"></i>Website Clicks</span><span><i class="dot" style="background:#f59e0b"></i>Direction Requests</span><span><i class="dot" style="background:#18bf8f"></i>Call Clicks</span></div>
+      ${performanceTrendChart()}
+      ${perf.hasData ? performanceTable() : `<div class="empty-inline chart-note">Waiting for Google Business Profile analytics sync. Once rows are added to <strong>gbp_daily_metrics</strong>, this chart will draw real lines.</div>`}
+    </div>
+    <div class="grid two-grid section">
+      ${breakdownCard("How People Find You", "Google Search vs Google Maps", "search")}
+      ${breakdownCard("Device Breakdown", "Desktop vs Mobile", "device")}
+    </div>
+    <div class="card card-pad section">
+      <h3>How People Search for You <span class="badge" style="float:right">${state.period}</span></h3>
+      <p>Search terms people use to find your business on Google</p>
+      <div class="search-stats"><div class="search-stat"><strong>0</strong>SEARCH TERMS</div><div class="search-stat" style="background:#eef2ff;color:#4f46e5"><strong>0%</strong>BRAND SEARCHES</div><div class="search-stat" style="background:#e9fbf3;color:#12a66c"><strong>0%</strong>DISCOVERY SEARCHES</div></div>
+      <div class="empty-inline">Waiting for Google keyword impression rows.</div>
+    </div>
   </section>`;
   return `<section class="section">
     <div class="section-title"><div class="soft-icon blue" style="width:34px;height:34px">G</div><div><h2>Google Business Profile Insights</h2><p>How customers find and interact with your business on Google</p></div></div>
@@ -514,7 +526,7 @@ function reviewAnalyticsSections() {
     <div class="card card-pad"><h2>Response Rate</h2><div class="metric-lite"><strong>${summary.responseRate}%</strong><p>Based on ${summary.total} review${summary.total === 1 ? "" : "s"} in ${state.period}</p></div></div>
     <div class="card card-pad"><h2>Rating Summary</h2><div class="search-stats" style="text-align:center"><div><strong style="font-size:34px;color:#f59e0b">${summary.average.toFixed(1)}</strong><p>Current Rating</p></div><div><strong style="font-size:34px;color:#373ba3">${summary.total}</strong><p>Total Reviews</p></div><div><strong style="font-size:34px;color:#373ba3">${summary.needsResponse}</strong><p>Need Response</p></div></div></div>
   </div>
-  <div class="card card-pad section"><h2>Review Velocity</h2>${monthly.length ? reviewVelocityChart(monthly) : `<div class="empty-inline">No review dates available for this period.</div>`}</div>
+  <div class="card card-pad section"><h2>Review Velocity</h2>${reviewVelocityChart(monthly)}</div>
   <div class="card card-pad section"><h2>Review Sources</h2>${sources.length ? sourceList(sources) : `<div class="empty-inline">No review source data available for this period.</div>`}</div>`;
   return `<div class="grid two-grid section">
     <div class="card card-pad"><h2>Response Rate</h2>${lineMini()}</div>
@@ -563,6 +575,62 @@ function performanceTable() {
   return `<table class="table"><thead><tr><th>Date</th><th>Metric</th><th>Value</th></tr></thead><tbody>${rows.map(row => `<tr><td>${row.metric_date || row.date || ""}</td><td>${row.metric_name || row.metric || row.name || "Metric"}</td><td>${formatNumber(metricValue(row))}</td></tr>`).join("")}</tbody></table>`;
 }
 
+function performanceTrendChart() {
+  const rows = getPerformanceRows();
+  const byMetric = groupMetricSeries(rows);
+  const series = [
+    ["impressions", "#6b6cf6", ["impressions", "business_impressions", "business_impressions_desktop_search", "business_impressions_mobile_search", "business_impressions_desktop_maps", "business_impressions_mobile_maps"]],
+    ["website", "#ff4747", ["website_clicks", "website clicks", "business_website_clicks"]],
+    ["directions", "#f59e0b", ["directions", "direction_requests", "business_direction_requests"]],
+    ["calls", "#18bf8f", ["calls", "call_clicks", "business_conversations"]]
+  ];
+  const allDates = [...new Set(rows.map(row => row.metric_date || row.date || row.created_at).filter(Boolean))].sort();
+  const max = Math.max(1, ...rows.map(metricValue));
+  const labels = allDates.length ? allDates : ["Start", "", "", "", "Now"];
+  return `<svg class="chart" viewBox="0 0 1280 330" preserveAspectRatio="none">
+    ${[50,100,150,200,250].map(y => `<line class="gridline" x1="40" x2="1240" y1="${y}" y2="${y}"/>`).join("")}
+    <line class="axis" x1="40" x2="1240" y1="255" y2="255"/>
+    ${series.map(([name, color, aliases]) => {
+      const points = chartPoints(allDates, byMetric, aliases, max);
+      return points ? `<polyline points="${points}" fill="none" stroke="${color}" stroke-width="3"/>` : "";
+    }).join("")}
+    ${labels.slice(0, 10).map((m,i)=>`<text x="${40+i*(1180/Math.max(1, labels.slice(0, 10).length - 1))}" y="292">${String(m).slice(0, 10)}</text>`).join("")}
+    ${rows.length ? "" : `<text x="520" y="160" class="chart-empty">No GBP analytics rows yet</text>`}
+  </svg>`;
+}
+
+function groupMetricSeries(rows) {
+  return rows.reduce((map, row) => {
+    const metric = String(row.metric_name || row.metric || row.name || "").toLowerCase();
+    const date = row.metric_date || row.date || row.created_at;
+    if (!metric || !date) return map;
+    map[metric] = map[metric] || {};
+    map[metric][date] = (map[metric][date] || 0) + metricValue(row);
+    return map;
+  }, {});
+}
+
+function chartPoints(dates, byMetric, aliases, max) {
+  if (!dates.length) return "";
+  const lowerAliases = aliases.map(alias => alias.toLowerCase());
+  const values = dates.map(date => lowerAliases.reduce((sum, alias) => sum + (byMetric[alias]?.[date] || 0), 0));
+  if (!values.some(Boolean)) return "";
+  return values.map((value, index) => {
+    const x = 40 + index * (1180 / Math.max(1, dates.length - 1));
+    const y = 255 - (value / max) * 210;
+    return `${x},${y}`;
+  }).join(" ");
+}
+
+function breakdownCard(title, sub, type) {
+  const rows = getPerformanceRows();
+  const hasData = rows.length > 0;
+  const bg = hasData ? "conic-gradient(#6366f1 0 50%, #18bf8f 50% 100%)" : "conic-gradient(#e7ebf2 0 100%)";
+  const a = type === "device" ? "Desktop" : "Google Search";
+  const b = type === "device" ? "Mobile" : "Google Maps";
+  return `<div class="card card-pad"><h3>${title}</h3><p>${sub}</p><div class="donut-wrap"><div class="donut" style="background:${bg}"><div class="donut-center">Total<strong>${formatNumber(rows.reduce((sum, row) => sum + metricValue(row), 0))}</strong></div></div><div class="legend"><span><i class="dot" style="background:#6366f1"></i>${a}</span><span><i class="dot" style="background:#18bf8f"></i>${b}</span></div>${hasData ? "" : `<div class="empty-inline">Waiting for breakdown metrics.</div>`}</div></div>`;
+}
+
 function reviewsByMonth() {
   const map = new Map();
   getReviews().forEach(review => {
@@ -575,6 +643,13 @@ function reviewsByMonth() {
 }
 
 function reviewVelocityChart(rows) {
+  if (!rows.length) {
+    return `<svg class="chart" viewBox="0 0 1180 320" preserveAspectRatio="none">
+      ${[70,120,170,220,270].map(y => `<line class="gridline" x1="45" x2="1140" y1="${y}" y2="${y}"/>`).join("")}
+      <line class="axis" x1="45" x2="1140" y1="270" y2="270"/>
+      <text x="500" y="160" class="chart-empty">No review rows for this period</text>
+    </svg>`;
+  }
   const max = Math.max(...rows.map(row => row[1]), 1);
   return `<div class="velocity-bars">${rows.map(([label, count]) => `<div><div class="velocity-bar"><span style="height:${Math.max(8, (count / max) * 180)}px"></span></div><strong>${count}</strong><p>${label}</p></div>`).join("")}</div>`;
 }
@@ -778,55 +853,4 @@ function feedbackFormsPage() {
   const forms = liveData.forms || [];
   return `<div class="page-head"><h1>Feedback Forms</h1></div>
   ${dataNotice()}
-  <div class="filter-row"><input class="search" placeholder="Search forms..." data-search-table="forms" style="width:360px"><span style="flex:1"></span><button class="button primary" disabled>+ Create Form</button></div>
-  <div class="form-grid">${forms.length ? forms.map(formCard).join("") : `<div class="card card-pad empty-inline"><h2>No feedback forms found</h2><p>Create/sync rows in <strong>feedback_forms</strong> to show real forms here.</p></div>`}<div class="create-tile"><div><div class="soft-icon" style="margin:0 auto 16px">+</div><h3>Create Form</h3><p>Connect Supabase insert logic before enabling this.</p></div></div></div>`;
-  return `<div class="page-head"><h1>Feedback Forms</h1></div><div class="filter-row"><input class="search" placeholder="Search forms..." style="width:360px"><span style="flex:1"></span><button class="button primary">+ Create Form</button></div>
-  <div class="form-grid"><div class="card"><div class="form-card-preview"><div class="mini-form"><strong>How would you rate us?</strong><p>Please take a moment to review your experience with us.</p><div class="stars" style="color:#b8bec8">★★★★★</div><small>Powered by Airtime Heating Cooling and Air</small></div></div><div class="card-pad"><h3>Default</h3><p>▣ 19 Mar 2026</p><div class="grid two-grid" style="margin-top:16px;gap:8px"><button class="button primary">✎ Edit</button><button class="button">&lt;/&gt; Install</button></div></div></div><div class="create-tile"><div><div class="soft-icon" style="margin:0 auto 16px">+</div><h3>Create Form</h3><p>Capture feedback from another channel.</p></div></div></div>`;
-}
-
-function qrCodesPage() {
-  const qrCodes = liveData.qrCodes || [];
-  return `<div class="page-head"><h1>QR Codes</h1></div>
-  ${dataNotice()}
-  ${qrCodes.length ? `<div class="grid stat-grid">${qrCodes.map(qrCard).join("")}</div>` : `<div class="empty-state" style="min-height:620px"><div style="width:100%;max-width:850px"><div class="soft-icon blue" style="margin:0 auto 24px;width:58px;height:58px">${icons.qr}</div><h2>No QR Codes in Supabase Yet</h2><p>Sync or create rows in a <strong>qr_codes</strong> table to show real QR code records, scan counts, and conversion data here.</p><button class="button primary" style="margin-top:28px" disabled>Create QR Code after backend is connected</button></div></div>`}`;
-  return `<div class="page-head"><h1>QR Codes</h1></div><div class="empty-state" style="min-height:760px"><div style="width:100%;max-width:1350px"><div class="soft-icon blue" style="margin:0 auto 24px;width:58px;height:58px">${icons.qr}</div><h2>Start Collecting Reviews with QR Codes</h2><p>QR codes make it super easy for customers to leave reviews. Simply scan and go - no<br>typing required!</p><div class="feature-row">${feature("Lightning Fast","Customers scan and review in seconds. No typing, no hassle - just point and shoot!","green")}${feature("Prevent Negative Reviews","Direct unhappy customers to private feedback forms instead of public review sites.","blue")}${feature("Track Performance","See exactly how many scans each QR code gets and which ones drive the most reviews.","purple")}</div><div class="card card-pad"><h2 style="text-align:left">Perfect for:</h2><div class="perfect section"><div>🍽<br><strong>Restaurants</strong></div><div>🏢<br><strong>Retail Stores</strong></div><div>📄<br><strong>Service Businesses</strong></div><div>💼<br><strong>Hotels</strong></div></div></div><button class="button primary" style="margin-top:48px;height:56px;font-size:18px">▦ Create Your First QR Code</button><p style="margin-top:14px">Get started in less than 2 minutes</p></div></div>`;
-}
-
-function feature(title, text, color) {
-  return `<div class="card card-pad" style="text-align:left"><div class="soft-icon ${color}" style="width:38px;height:38px">✦</div><h3 style="margin-top:14px">${title}</h3><p style="margin-top:18px">${text}</p></div>`;
-}
-
-function placeholderPage() {
-  const title = state.page.split("-").map(x => x[0].toUpperCase() + x.slice(1)).join(" ");
-  return `<div class="empty-state"><div><h1>${title}</h1><p>This page shell is ready for the matching GHL route or backend data.</p></div></div>`;
-}
-
-function bindPageEvents() {
-  document.querySelectorAll("[data-tab]").forEach(btn => btn.addEventListener("click", () => {
-    state.page = "dashboard";
-    state.tab = btn.dataset.tab;
-    syncRoute();
-    render();
-  }));
-  document.querySelectorAll("[data-period]").forEach(btn => btn.addEventListener("click", () => {
-    state.period = btn.dataset.period;
-    render();
-  }));
-}
-
-document.querySelectorAll(".nav-item,.subnav button").forEach(btn => btn.addEventListener("click", () => {
-  state.page = btn.dataset.page;
-  state.tab = btn.dataset.tab || state.tab || "overview";
-  if (state.page !== "dashboard") state.tab = "overview";
-  syncRoute();
-  render();
-}));
-document.getElementById("menuToggle").addEventListener("click", () => sidebar.classList.toggle("open"));
-render();
-loadLiveData();
-
-
-
-
-
-
+  <div class="filter-row"><input class="search" placeholder="Search forms..." data-search-table="forms" style="width:360px"><span style="flex:1"></span><button class="button primary" disabled>+ Create 
