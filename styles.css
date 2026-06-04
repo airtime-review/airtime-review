@@ -387,6 +387,14 @@ p { margin: 0; color: var(--muted); }
   overflow: visible;
 }
 .chart text { fill: #93a0bb; font-size: 12px; font-weight: 700; }
+.chart .chart-empty {
+  fill: #728096;
+  font-size: 16px;
+}
+.chart-note {
+  margin-top: -18px;
+  padding-bottom: 10px;
+}
 .gridline { stroke: #e8edf6; stroke-dasharray: 5 5; }
 .axis { stroke: #dfe5ee; }
 .legend {
@@ -574,7 +582,4 @@ p { margin: 0; color: var(--muted); }
   .kpi-row { grid-template-columns: repeat(3, 1fr); }
 }
 @media (max-width: 760px) {
-  .sidebar { transform: translateX(-100%); transition: transform .2s ease; }
-  .sidebar.open { transform: translateX(0); }
-  .app { padding-left: 0; }
-  .men
+  .sidebar { transform: translateX(-
