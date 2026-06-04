@@ -119,6 +119,12 @@ function getReviews() {
   return liveData.reviews || [];
 }
 
+function dataNotice() {
+  if (!liveData.loaded) return `<div class="data-notice">Loading Supabase data...</div>`;
+  if (liveData.error) return `<div class="data-notice error">Could not load Supabase data. ${liveData.error}</div>`;
+  return "";
+}
+
 function getSummary() {
   const activeReviews = getReviews();
   const ratings = activeReviews.map(r => Number(r[3] || 0)).filter(Boolean);
@@ -427,7 +433,9 @@ function reviewsPage() {
 }
 
 function reviewCard(r, compact = false) {
-  const stars = "?".repeat(Math.max(0, Math.min(5, Number(r[3])))) + "?".repeat(Math.max(0, 5 - Math.min(5, Number(r[3]))));
+  const filledStars = "&#9733;".repeat(Math.max(0, Math.min(5, Number(r[3]))));
+  const emptyStars = "&#9734;".repeat(Math.max(0, 5 - Math.min(5, Number(r[3]))));
+  const stars = filledStars + emptyStars;
   return `<article class="card review-card">
     <div><div class="review-top"><div class="avatar">${r[6]}</div><div><h3>${r[0]} ${r[2] === "Private Feedback" ? '<span class="badge" style="color:#2f80ff">🔒 Private Feedback</span>' : ""}</h3><p>${r[1]} via ${r[2]}</p><div class="review-stars">${stars} <span class="muted">${r[3]}</span> 😊</div>${!compact ? `<p style="margin-top:14px;color:#465366">${r[4]}</p><div class="reply-box">${r[8] || `Thank you for the ${r[3]}-star review. We're glad we could help and appreciate you sharing your experience.`}</div>` : ""}<p style="margin-top:18px"><span class="dot" style="background:#22c55e"></span>Positive</p></div></div></div>
     <div class="review-actions">${r[5] === "Respond" ? '<button class="button green">✧ Respond</button>' : '<span class="status-pill">✓ Replied</span>'}</div>
