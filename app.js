@@ -41,13 +41,11 @@ const routeMap = {
 const state = getInitialRoute();
 const content = document.getElementById("appContent");
 const sidebar = document.getElementById("sidebar");
+const SUPABASE_URL = "https://lhhnjsfanofraeydxzsf.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxoaG5qc2Zhbm9mcmFleWR4enNmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0MjQ1MzEsImV4cCI6MjA5NjAwMDUzMX0.Pt8NML6JYmT72dTJn_XJR3XC_hoH9Lh2FpSWk5dnKzc";
+const liveData = { loaded: false, error: null, reviews: null, metrics: null };
 
-const reviews = [
-  ["TheFullEffectBarbershop", "31st May 2026", "Google", 5, "Thank you for the 5-star rating! We appreciate your support and look forward to serving you again at The Full Effect Barbershop. Your recommendation means a lot to our team.", "Replied", "T"],
-  ["Fernando Bojorquez", "30th May 2026", "Private Feedback", 4, "Found unexpected issues hav not talked to yet", "Respond", "FB"],
-  ["Rosalie Swentek", "30th May 2026", "Google", 5, "They came the same day to fix my toilet problem.", "Replied", "R"],
-  ["David Tichich", "2 days ago", "Google", 5, "These guys were great! On time and gave me plenty of options for the proper fix. Even fixed some stuff I was not aware of which was a huge help. I’ll be back with them in the future.", "Replied", "D"]
-];
+const fallbackReviews = [];
 
 function render() {
   document.body.classList.toggle("embedded", state.embedded);
@@ -68,6 +66,88 @@ function render() {
   content.innerHTML = (pages[state.page] || placeholderPage)();
   bindPageEvents();
   sidebar.classList.remove("open");
+}
+
+async function loadLiveData() {
+  try {
+    const [reviewRows, metricRows] = await Promise.all([
+      supabaseRest("reviews?select=*&order=review_time.desc"),
+      supabaseRest("dashboard_metrics?select=*&limit=1")
+    ]);
+    liveData.reviews = reviewRows.map(mapReviewRow);
+    liveData.metrics = metricRows[0] || null;
+    liveData.loaded = true;
+    liveData.error = null;
+  } catch (error) {
+    liveData.loaded = true;
+    liveData.error = error.message;
+    console.warn("Supabase live data failed:", error);
+  }
+  render();
+}
+
+async function supabaseRest(path) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json"
+    }
+  });
+  if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+  return response.json();
+}
+
+function mapReviewRow(row) {
+  const name = row.reviewer_name || "Google Customer";
+  const reply = row.reply_text || row.review_reply || "";
+  return [
+    name,
+    formatReviewDate(row.review_time || row.create_time),
+    sourceLabel(row.source),
+    Number(row.rating || 0),
+    row.review_text || row.comment || "",
+    reply ? "Replied" : "Respond",
+    initials(name),
+    row.status || (reply ? "replied" : "needs_response"),
+    reply
+  ];
+}
+
+function getReviews() {
+  if (!liveData.loaded) return fallbackReviews;
+  return liveData.reviews || [];
+}
+
+function getSummary() {
+  const activeReviews = getReviews();
+  const ratings = activeReviews.map(r => Number(r[3] || 0)).filter(Boolean);
+  const replied = activeReviews.filter(r => r[5] === "Replied" || r[7] === "replied").length;
+  return {
+    total: liveData.metrics?.total_reviews ?? activeReviews.length,
+    average: Number(liveData.metrics?.average_rating ?? (ratings.length ? ratings.reduce((sum, rating) => sum + rating, 0) / ratings.length : 0)),
+    responseRate: Number(liveData.metrics?.response_rate ?? (activeReviews.length ? Math.round((replied / activeReviews.length) * 1000) / 10 : 0)),
+    inviteConversion: Number(liveData.metrics?.invite_conversion ?? 0),
+    avgResponseTime: liveData.metrics?.avg_response_time || "-",
+    bad: activeReviews.filter(r => Number(r[3]) <= 3).length,
+    needsResponse: activeReviews.filter(r => r[5] === "Respond" || r[7] === "needs_response").length
+  };
+}
+
+function formatReviewDate(value) {
+  if (!value) return "Recently";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Recently";
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function sourceLabel(source) {
+  if (!source) return "Google";
+  return source.charAt(0).toUpperCase() + source.slice(1);
+}
+
+function initials(name) {
+  return name.split(/\s+/).filter(Boolean).slice(0, 2).map(part => part[0]).join("").toUpperCase() || "G";
 }
 
 function getInitialRoute() {
@@ -133,7 +213,10 @@ function head(title, subtitle, tab = state.tab) {
 function dashboardPage() {
   if (state.tab === "analytics") return analyticsTab();
   if (state.tab === "qr") return qrAnalyticsTab();
+  const summary = getSummary();
+  const average = summary.average.toFixed(1);
   return `${head("Good Evening!", "Here's your business reputation at a glance.", "overview")}
+    ${dataNotice()}
     <div class="toolbar">
       <h3>▣ Time Period</h3>
       ${period()}
@@ -142,18 +225,18 @@ function dashboardPage() {
       <div class="card card-pad reputation">
         <div class="soft-icon amber">${icons.star}</div>
         <p>Overall Reputation</p>
-        <div class="rating-big">4.9 <span>/ 5</span></div>
+        <div class="rating-big">${average} <span>/ 5</span></div>
         <div class="positive">↑ +0.0 vs last month</div>
         <div class="stars">★★★★★</div>
         <div class="breakdown">View Breakdown⌄</div>
       </div>
       <div class="stacked-metrics">
-        ${metric("Total Reviews", "157", "↑ +0% vs last month", "blue", "chat")}
-        ${metric("Response Rate", "94.3%", "↑ +0.0% vs last month", "purple", "clock")}
+        ${metric("Total Reviews", String(summary.total), "↑ +0% vs last month", "blue", "chat")}
+        ${metric("Response Rate", `${summary.responseRate}%`, "↑ +0.0% vs last month", "purple", "clock")}
       </div>
       <div class="stacked-metrics">
-        ${metric("Invite Conversion", "16.5%", "↓ -0.1% vs last month", "green", "trend", true)}
-        ${metric("Avg. Response Time", "2.1h", "↑ +0m vs last month", "blue", "clock")}
+        ${metric("Invite Conversion", `${summary.inviteConversion}%`, "↓ -0.1% vs last month", "green", "trend", true)}
+        ${metric("Avg. Response Time", summary.avgResponseTime, "↑ +0m vs last month", "blue", "clock")}
       </div>
     </section>
     ${blueHero()}
@@ -296,7 +379,11 @@ function sourceLine(name, count, pct, color) {
 }
 
 function recentReviews() {
-  return `<section class="section"><h2>Recent Reviews</h2>${reviews.map(r => reviewCard(r, true)).join("")}<button class="button" style="width:100%;margin-top:12px">⌄ Load More Reviews</button></section>`;
+  const activeReviews = getReviews();
+  const body = activeReviews.length
+    ? `${activeReviews.map(r => reviewCard(r, true)).join("")}<button class="button" style="width:100%;margin-top:12px">⌄ Load More Reviews</button>`
+    : `<div class="card card-pad empty-inline">No reviews found in Supabase yet.</div>`;
+  return `<section class="section"><h2>Recent Reviews</h2>${body}</section>`;
 }
 
 function analyticsTab() {
@@ -323,19 +410,26 @@ function qrAnalyticsTab() {
 }
 
 function reviewsPage() {
+  const summary = getSummary();
+  const activeReviews = getReviews();
+  const chips = ["Flagged 0", `Needs Response ${summary.needsResponse}`, `Bad Reviews ${summary.bad}`, "Private Feedback 0"];
+  const reviewsBody = activeReviews.length
+    ? activeReviews.map(r => reviewCard(r)).join("")
+    : `<div class="card card-pad empty-inline">No reviews found in Supabase yet.</div>`;
   return `<div class="page-head"><h1>Reviews</h1></div>
-    <div class="filter-row"><input class="search" placeholder="Search reviews..."><strong>157 <span class="muted">reviews</span></strong><span style="flex:1"></span><button class="button">↧ Export (157)</button><button class="button primary">+ Add Reviews⌄</button></div>
-    <div class="filter-row">${["⚑ Flagged 0","☁ Needs Response 9","😡 Negative 3","🔒 Private Feedback 3"].map(x=>`<button class="chip">${x}</button>`).join("")}</div>
+    ${dataNotice()}
+    <div class="filter-row"><input class="search" placeholder="Search reviews..."><strong>${summary.total} <span class="muted">reviews</span></strong><span style="flex:1"></span><button class="button">↧ Export (${summary.total})</button><button class="button primary">+ Add Reviews⌄</button></div>
+    <div class="filter-row">${chips.map(x=>`<button class="chip">${x}</button>`).join("")}</div>
     <div class="reviews-layout">
       <aside class="card filters"><strong>Filters</strong><label>Sources</label><div class="select-like">Nothing Selected⌄</div><label>Tags</label><div class="select-like">Nothing Selected⌄</div><label>Rating</label><div class="rating-filter">${[5,4,3,2,1].map(n=>`<button>★<br>${n}</button>`).join("")}</div><label>Time Period</label><div class="date-like">▣</div><label>Response Status</label><div class="dual-filter"><button>✓ Responded</button><button>☏ Pending</button></div><label>Visibility</label><div class="dual-filter"><button>◉ Visible</button><button>◌ Hidden</button></div><label>Review Content</label><div class="dual-filter"><button>With Text</button><button>Rating Only</button></div></aside>
-      <section>${reviews.slice(0,3).map(r => reviewCard(r)).join("")}</section>
+      <section>${reviewsBody}</section>
     </div>`;
 }
 
 function reviewCard(r, compact = false) {
-  const stars = "★★★★★".slice(0, r[3]) + "☆☆☆☆☆".slice(0, 5 - r[3]);
+  const stars = "?".repeat(Math.max(0, Math.min(5, Number(r[3])))) + "?".repeat(Math.max(0, 5 - Math.min(5, Number(r[3]))));
   return `<article class="card review-card">
-    <div><div class="review-top"><div class="avatar">${r[6]}</div><div><h3>${r[0]} ${r[2] === "Private Feedback" ? '<span class="badge" style="color:#2f80ff">🔒 Private Feedback</span>' : ""}</h3><p>${r[1]} via ${r[2]}</p><div class="review-stars">${stars} <span class="muted">${r[3]}</span> 😊</div>${!compact ? `<p style="margin-top:14px;color:#465366">${r[4]}</p><div class="reply-box">Thank you for the ${r[3]}-star review. We're glad we could help and appreciate you sharing your experience.</div>` : ""}<p style="margin-top:18px"><span class="dot" style="background:#22c55e"></span>Positive</p></div></div></div>
+    <div><div class="review-top"><div class="avatar">${r[6]}</div><div><h3>${r[0]} ${r[2] === "Private Feedback" ? '<span class="badge" style="color:#2f80ff">🔒 Private Feedback</span>' : ""}</h3><p>${r[1]} via ${r[2]}</p><div class="review-stars">${stars} <span class="muted">${r[3]}</span> 😊</div>${!compact ? `<p style="margin-top:14px;color:#465366">${r[4]}</p><div class="reply-box">${r[8] || `Thank you for the ${r[3]}-star review. We're glad we could help and appreciate you sharing your experience.`}</div>` : ""}<p style="margin-top:18px"><span class="dot" style="background:#22c55e"></span>Positive</p></div></div></div>
     <div class="review-actions">${r[5] === "Respond" ? '<button class="button green">✧ Respond</button>' : '<span class="status-pill">✓ Replied</span>'}</div>
   </article>`;
 }
@@ -398,3 +492,10 @@ document.querySelectorAll(".nav-item,.subnav button").forEach(btn => btn.addEven
 }));
 document.getElementById("menuToggle").addEventListener("click", () => sidebar.classList.toggle("open"));
 render();
+loadLiveData();
+
+
+
+
+
+
