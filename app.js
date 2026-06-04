@@ -39,11 +39,24 @@ const routeMap = {
 };
 
 const state = getInitialRoute();
+state.period = "All Time";
 const content = document.getElementById("appContent");
 const sidebar = document.getElementById("sidebar");
 const SUPABASE_URL = "https://lhhnjsfanofraeydxzsf.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxoaG5qc2Zhbm9mcmFleWR4enNmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0MjQ1MzEsImV4cCI6MjA5NjAwMDUzMX0.Pt8NML6JYmT72dTJn_XJR3XC_hoH9Lh2FpSWk5dnKzc";
-const liveData = { loaded: false, error: null, reviews: null, metrics: null };
+const liveData = {
+  loaded: false,
+  error: null,
+  reviews: null,
+  metrics: null,
+  performance: null,
+  invitees: null,
+  campaigns: null,
+  forms: null,
+  qrCodes: null,
+  locations: null,
+  connections: null
+};
 
 const fallbackReviews = [];
 
@@ -70,12 +83,26 @@ function render() {
 
 async function loadLiveData() {
   try {
-    const [reviewRows, metricRows] = await Promise.all([
+    const [reviewRows, metricRows, performanceRows, invitees, campaigns, forms, qrCodes, locations, connections] = await Promise.all([
       supabaseRest("reviews?select=*&order=review_time.desc"),
-      supabaseRest("dashboard_metrics?select=*&limit=1")
+      supabaseRest("dashboard_metrics?select=*&limit=1"),
+      supabaseRest("gbp_daily_metrics?select=*&order=metric_date.desc"),
+      safeSupabaseRest("invitees?select=*&order=created_at.desc"),
+      safeSupabaseRest("campaigns?select=*&order=created_at.desc"),
+      safeSupabaseRest("feedback_forms?select=*&order=created_at.desc"),
+      safeSupabaseRest("qr_codes?select=*&order=created_at.desc"),
+      safeSupabaseRest("locations?select=*"),
+      safeSupabaseRest("api_connections?select=*")
     ]);
     liveData.reviews = reviewRows.map(mapReviewRow);
     liveData.metrics = metricRows[0] || null;
+    liveData.performance = performanceRows || [];
+    liveData.invitees = invitees || [];
+    liveData.campaigns = campaigns || [];
+    liveData.forms = forms || [];
+    liveData.qrCodes = qrCodes || [];
+    liveData.locations = locations || [];
+    liveData.connections = connections || [];
     liveData.loaded = true;
     liveData.error = null;
   } catch (error) {
@@ -98,6 +125,15 @@ async function supabaseRest(path) {
   return response.json();
 }
 
+async function safeSupabaseRest(path) {
+  try {
+    return await supabaseRest(path);
+  } catch (error) {
+    console.warn(`Optional Supabase table not available: ${path}`, error);
+    return [];
+  }
+}
+
 function mapReviewRow(row) {
   const name = row.reviewer_name || "Google Customer";
   const reply = row.reply_text || row.review_reply || "";
@@ -110,13 +146,14 @@ function mapReviewRow(row) {
     reply ? "Replied" : "Respond",
     initials(name),
     row.status || (reply ? "replied" : "needs_response"),
-    reply
+    reply,
+    row.review_time || row.create_time || null
   ];
 }
 
 function getReviews() {
   if (!liveData.loaded) return fallbackReviews;
-  return liveData.reviews || [];
+  return filterByPeriod(liveData.reviews || [], review => review[9]);
 }
 
 function dataNotice() {
@@ -129,14 +166,73 @@ function getSummary() {
   const activeReviews = getReviews();
   const ratings = activeReviews.map(r => Number(r[3] || 0)).filter(Boolean);
   const replied = activeReviews.filter(r => r[5] === "Replied" || r[7] === "replied").length;
+  const useStoredMetrics = state.period === "All Time" && liveData.metrics;
   return {
-    total: liveData.metrics?.total_reviews ?? activeReviews.length,
-    average: Number(liveData.metrics?.average_rating ?? (ratings.length ? ratings.reduce((sum, rating) => sum + rating, 0) / ratings.length : 0)),
-    responseRate: Number(liveData.metrics?.response_rate ?? (activeReviews.length ? Math.round((replied / activeReviews.length) * 1000) / 10 : 0)),
-    inviteConversion: Number(liveData.metrics?.invite_conversion ?? 0),
-    avgResponseTime: liveData.metrics?.avg_response_time || "-",
+    total: useStoredMetrics ? liveData.metrics.total_reviews : activeReviews.length,
+    average: Number(useStoredMetrics ? liveData.metrics.average_rating : (ratings.length ? ratings.reduce((sum, rating) => sum + rating, 0) / ratings.length : 0)),
+    responseRate: Number(useStoredMetrics ? liveData.metrics.response_rate : (activeReviews.length ? Math.round((replied / activeReviews.length) * 1000) / 10 : 0)),
+    inviteConversion: Number(useStoredMetrics ? (liveData.metrics.invite_conversion ?? 0) : 0),
+    avgResponseTime: useStoredMetrics ? (liveData.metrics.avg_response_time || "-") : "-",
     bad: activeReviews.filter(r => Number(r[3]) <= 3).length,
     needsResponse: activeReviews.filter(r => r[5] === "Respond" || r[7] === "needs_response").length
+  };
+}
+
+function getPeriodStart(period) {
+  const now = new Date();
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  if (period === "7 Days") start.setDate(start.getDate() - 7);
+  else if (period === "30 Days") start.setDate(start.getDate() - 30);
+  else if (period === "90 Days") start.setDate(start.getDate() - 90);
+  else if (period === "This Month") start.setDate(1);
+  else if (period === "Last Month") {
+    start.setMonth(start.getMonth() - 1, 1);
+    const end = new Date(start);
+    end.setMonth(end.getMonth() + 1);
+    return { start, end };
+  } else if (period === "This Year") {
+    start.setMonth(0, 1);
+  } else {
+    return null;
+  }
+  return { start, end: now };
+}
+
+function filterByPeriod(rows, dateGetter) {
+  const range = getPeriodStart(state.period);
+  if (!range) return rows;
+  return rows.filter(row => {
+    const raw = dateGetter(row);
+    if (!raw) return false;
+    const date = new Date(raw);
+    return !Number.isNaN(date.getTime()) && date >= range.start && date <= range.end;
+  });
+}
+
+function getPerformanceRows() {
+  return filterByPeriod(liveData.performance || [], row => row.metric_date || row.date || row.created_at);
+}
+
+function metricValue(row) {
+  return Number(row.metric_value ?? row.value ?? row.count ?? 0) || 0;
+}
+
+function metricTotal(names) {
+  const allowed = names.map(name => String(name).toLowerCase());
+  return getPerformanceRows()
+    .filter(row => allowed.includes(String(row.metric_name || row.metric || row.name || "").toLowerCase()))
+    .reduce((sum, row) => sum + metricValue(row), 0);
+}
+
+function getPerformanceSummary() {
+  const rows = getPerformanceRows();
+  return {
+    hasData: rows.length > 0,
+    impressions: metricTotal(["impressions", "business_impressions", "business_impressions_desktop_search", "business_impressions_mobile_search", "business_impressions_desktop_maps", "business_impressions_mobile_maps"]),
+    calls: metricTotal(["calls", "call_clicks", "business_conversations"]),
+    directions: metricTotal(["directions", "direction_requests", "business_direction_requests"]),
+    websiteClicks: metricTotal(["website_clicks", "website clicks", "business_website_clicks"])
   };
 }
 
@@ -252,7 +348,7 @@ function dashboardPage() {
 }
 
 function period() {
-  return `<div class="period">${["All Time","7 Days","30 Days","90 Days","This Month","Last Month","This Year","Custom"].map((x, i) => `<button class="${i === 0 ? "active" : ""}">${x}</button>`).join("")}</div>`;
+  return `<div class="period">${["All Time","7 Days","30 Days","90 Days","This Month","Last Month","This Year","Custom"].map(x => `<button class="${state.period === x ? "active" : ""}" data-period="${x}">${x}</button>`).join("")}</div>`;
 }
 
 function metric(label, value, delta, color, icon, negative = false) {
@@ -263,6 +359,40 @@ function metric(label, value, delta, color, icon, negative = false) {
 }
 
 function blueHero() {
+  const summary = getSummary();
+  const reviews = getReviews();
+  const last30 = countReviewsBetween(30, 0);
+  const previous30 = countReviewsBetween(60, 30);
+  const trendText = previous30 ? `${Math.abs(Math.round(((last30 - previous30) / previous30) * 100))}% ${last30 >= previous30 ? "increase" : "decrease"}` : "No previous data";
+  const average = summary.average.toFixed(1);
+  return `<section class="blue-panel">
+    <div class="hero-grid">
+      <div>
+        <span class="pill">G Google</span>
+        <h2>${summary.total ? "Keep collecting reviews" : "Waiting for live reviews"}</h2>
+        <p>${summary.total ? `Current live rating is <strong>${average}</strong> from <strong>${summary.total}</strong> reviews.` : "Once Supabase has Google reviews, this section will update automatically."}</p>
+        <div class="notice"><strong>Why this matters:</strong> Higher ratings help you show up first when people search on Google Maps and Google Search. More stars = more customers finding your business!</div>
+        <div class="notice"><strong>Live data status</strong><br>${reviews.length ? "This panel is using reviews from Supabase." : "No synced review rows for this selected period yet."}</div>
+        <div class="blue-stats">
+          <div class="blue-card"><small>LAST 30 DAYS</small><strong>${last30}</strong>reviews<br><b style="color:#ffe25c">${trendText}</b></div>
+          <div class="blue-card"><small>PREVIOUS 30 DAYS</small><strong>${previous30}</strong>reviews</div>
+        </div>
+        <div class="blue-card">
+          <small>REVIEW MOMENTUM</small>
+          <h3>${last30 ? `${last30} review${last30 === 1 ? "" : "s"} collected in the last 30 days.` : "No reviews collected in the last 30 days."}</h3>
+          <div class="progress"><span style="width:${Math.min(100, last30 * 5)}%"></span></div>
+        </div>
+      </div>
+      <div class="blue-card" style="align-self:center;text-align:center;padding:44px">
+        <small>CURRENT RATING</small>
+        <div class="rating-big">${average} &#9733;</div>
+        <div class="stars" style="color:white">${ratingStars(summary.average)}</div>
+        <hr style="border-color:rgba(255,255,255,.22)">
+        <div class="blue-stats"><div><strong>${summary.total}</strong><small>TOTAL REVIEWS</small></div><div><strong>5.0</strong><small>NEXT GOAL</small></div></div>
+        <div class="notice">Revenue calculator is not connected yet.<br><button class="button" style="margin-top:12px;background:rgba(255,255,255,.25);color:white" disabled>Connect revenue data first</button></div>
+      </div>
+    </div>
+  </section>`;
   return `<section class="blue-panel">
     <div class="hero-grid">
       <div>
@@ -294,6 +424,20 @@ function blueHero() {
 }
 
 function googleInsights() {
+  const perf = getPerformanceSummary();
+  const empty = `<div class="card card-pad section empty-inline">
+    Waiting for Google Business Profile analytics sync. Once Google approves API access and rows are added to <strong>gbp_daily_metrics</strong>, this section will show real impressions, calls, directions, and website clicks.
+  </div>`;
+  return `<section class="section">
+    <div class="section-title"><div class="soft-icon blue" style="width:34px;height:34px">G</div><div><h2>Google Business Profile Insights</h2><p>How customers find and interact with your business on Google</p></div></div>
+    <div class="grid stat-grid">
+      ${smallStat("IMPRESSIONS", formatNumber(perf.impressions))}
+      ${smallStat("CALL CLICKS", formatNumber(perf.calls))}
+      ${smallStat("DIRECTIONS", formatNumber(perf.directions))}
+      ${smallStat("WEBSITE CLICKS", formatNumber(perf.websiteClicks))}
+    </div>
+    ${perf.hasData ? `<div class="card card-pad section"><h3>Performance Trends <span class="badge" style="float:right">${state.period}</span></h3>${performanceTable()}</div>` : empty}
+  </section>`;
   return `<section class="section">
     <div class="section-title"><div class="soft-icon blue" style="width:34px;height:34px">G</div><div><h2>Google Business Profile Insights</h2><p>How customers find and interact with your business on Google</p></div></div>
     <div class="grid stat-grid">
@@ -363,6 +507,15 @@ function searchTable() {
 }
 
 function reviewAnalyticsSections() {
+  const summary = getSummary();
+  const monthly = reviewsByMonth();
+  const sources = reviewSources();
+  return `<div class="grid two-grid section">
+    <div class="card card-pad"><h2>Response Rate</h2><div class="metric-lite"><strong>${summary.responseRate}%</strong><p>Based on ${summary.total} review${summary.total === 1 ? "" : "s"} in ${state.period}</p></div></div>
+    <div class="card card-pad"><h2>Rating Summary</h2><div class="search-stats" style="text-align:center"><div><strong style="font-size:34px;color:#f59e0b">${summary.average.toFixed(1)}</strong><p>Current Rating</p></div><div><strong style="font-size:34px;color:#373ba3">${summary.total}</strong><p>Total Reviews</p></div><div><strong style="font-size:34px;color:#373ba3">${summary.needsResponse}</strong><p>Need Response</p></div></div></div>
+  </div>
+  <div class="card card-pad section"><h2>Review Velocity</h2>${monthly.length ? reviewVelocityChart(monthly) : `<div class="empty-inline">No review dates available for this period.</div>`}</div>
+  <div class="card card-pad section"><h2>Review Sources</h2>${sources.length ? sourceList(sources) : `<div class="empty-inline">No review source data available for this period.</div>`}</div>`;
   return `<div class="grid two-grid section">
     <div class="card card-pad"><h2>Response Rate</h2>${lineMini()}</div>
     <div class="card card-pad"><p>Since joining on Mar 19, 2026</p><div class="search-stats" style="text-align:center"><div><strong style="font-size:34px;color:#f59e0b">4.9</strong><p>Current Rating</p></div><div><strong style="font-size:34px;color:#373ba3">+0.0</strong><p>Increase</p></div><div><strong style="font-size:34px;color:#373ba3">90</strong><p>New Reviews</p></div></div>${barChart()}</div>
@@ -384,6 +537,130 @@ function sourceLine(name, count, pct, color) {
   return `<div style="margin:18px 0"><strong>${name}<span style="float:right">${count}</span></strong><div class="progress" style="background:#edf1f6;margin-top:8px"><span style="width:${pct}%;background:${color}"></span></div><span class="muted">${pct}%</span></div>`;
 }
 
+function countReviewsBetween(daysAgoStart, daysAgoEnd) {
+  const now = new Date();
+  const start = new Date(now);
+  start.setDate(start.getDate() - daysAgoStart);
+  const end = new Date(now);
+  end.setDate(end.getDate() - daysAgoEnd);
+  return (liveData.reviews || []).filter(review => {
+    const date = new Date(review[9]);
+    return !Number.isNaN(date.getTime()) && date >= start && date < end;
+  }).length;
+}
+
+function ratingStars(value) {
+  const filled = Math.max(0, Math.min(5, Math.round(Number(value) || 0)));
+  return "&#9733;".repeat(filled) + "&#9734;".repeat(5 - filled);
+}
+
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString("en-US");
+}
+
+function performanceTable() {
+  const rows = getPerformanceRows().slice(0, 12);
+  return `<table class="table"><thead><tr><th>Date</th><th>Metric</th><th>Value</th></tr></thead><tbody>${rows.map(row => `<tr><td>${row.metric_date || row.date || ""}</td><td>${row.metric_name || row.metric || row.name || "Metric"}</td><td>${formatNumber(metricValue(row))}</td></tr>`).join("")}</tbody></table>`;
+}
+
+function reviewsByMonth() {
+  const map = new Map();
+  getReviews().forEach(review => {
+    const date = new Date(review[9]);
+    if (Number.isNaN(date.getTime())) return;
+    const key = date.toLocaleDateString("en-US", { month: "short", year: "2-digit" });
+    map.set(key, (map.get(key) || 0) + 1);
+  });
+  return [...map.entries()].reverse();
+}
+
+function reviewVelocityChart(rows) {
+  const max = Math.max(...rows.map(row => row[1]), 1);
+  return `<div class="velocity-bars">${rows.map(([label, count]) => `<div><div class="velocity-bar"><span style="height:${Math.max(8, (count / max) * 180)}px"></span></div><strong>${count}</strong><p>${label}</p></div>`).join("")}</div>`;
+}
+
+function reviewSources() {
+  const counts = new Map();
+  getReviews().forEach(review => counts.set(review[2], (counts.get(review[2]) || 0) + 1));
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+function sourceList(sources) {
+  const total = sources.reduce((sum, source) => sum + source[1], 0) || 1;
+  return `<div>${sources.map(([name, count], index) => {
+    const colors = ["#6366f1", "#18bf8f", "#f59e0b", "#9a50ff"];
+    const pct = Math.round((count / total) * 100);
+    return sourceLine(name, count, pct, colors[index % colors.length]);
+  }).join("")}</div>`;
+}
+
+function countBy(rows, getter) {
+  return rows.reduce((counts, row) => {
+    const key = getter(row);
+    counts[key] = (counts[key] || 0) + 1;
+    return counts;
+  }, {});
+}
+
+function normalizeStatus(status) {
+  return String(status || "waiting").toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+function emptyTable(message) {
+  return `<div class="card-pad empty-inline">${message}</div>`;
+}
+
+function inviteeTable(rows) {
+  return `<table class="table"><thead><tr><th></th><th>Customer (Invitee)</th><th>Status</th><th>Recent Activity</th></tr></thead><tbody>${rows.map(row => {
+    const name = row.name || row.customer_name || row.full_name || row.email || "Invitee";
+    const email = row.email || "";
+    const phone = row.phone || row.phone_number || "";
+    const status = row.status || "Waiting";
+    const activity = row.recent_activity || row.last_activity || row.updated_at || row.created_at || "";
+    return `<tr><td><input type="checkbox" disabled></td><td><strong>${escapeHtml(name)}</strong><br><span class="muted">${escapeHtml(email)}${phone ? `<br>${escapeHtml(phone)}` : ""}</span></td><td><span class="badge">${escapeHtml(status)}</span></td><td>${escapeHtml(String(activity))}</td></tr>`;
+  }).join("")}</tbody></table>`;
+}
+
+function campaignCard(row) {
+  const name = row.name || row.campaign_name || "Review Campaign";
+  const sent = Number(row.sent || row.total_sent || 0);
+  const opened = Number(row.opened || row.total_opened || 0);
+  const clicked = Number(row.clicked || row.clicks || 0);
+  const reviews = Number(row.reviews || row.review_count || 0);
+  const rating = Number(row.rating || row.average_rating || 0);
+  return `<div class="card card-pad section"><div style="display:flex;justify-content:space-between;gap:20px"><div><h3>${escapeHtml(name)}</h3><span class="badge">${escapeHtml(row.status || "Draft")}</span> <span class="muted">${formatReviewDate(row.created_at)}</span></div><button class="button green" disabled>Edit</button></div>
+  <div class="kpi-row">${[
+    `${sent}|Sent`,
+    `${opened}|Opened`,
+    `${clicked}|Clicked`,
+    `${reviews}|Reviews`,
+    `${Number(row.opt_out || row.optouts || 0)}|Opt-out`,
+    `${rating ? rating.toFixed(1) : "-"}|Rating`
+  ].map(x=>{const [a,b]=x.split("|");return `<div class="card kpi"><strong>${a}</strong><p>${b}</p></div>`}).join("")}</div></div>`;
+}
+
+function formCard(row) {
+  const name = row.name || row.form_name || "Feedback Form";
+  return `<div class="card"><div class="form-card-preview"><div class="mini-form"><strong>${escapeHtml(name)}</strong><p>${escapeHtml(row.description || "Feedback form synced from Supabase.")}</p><div class="stars" style="color:#b8bec8">&#9733;&#9733;&#9733;&#9733;&#9733;</div><small>Powered by Airtime Heating Cooling and Air</small></div></div><div class="card-pad"><h3>${escapeHtml(name)}</h3><p>${formatReviewDate(row.created_at)}</p><div class="grid two-grid" style="margin-top:16px;gap:8px"><button class="button primary" disabled>Edit</button><button class="button" disabled>Install</button></div></div></div>`;
+}
+
+function qrCard(row) {
+  const name = row.name || row.qr_name || "QR Code";
+  const scans = Number(row.scans || row.scan_count || 0);
+  const reviews = Number(row.reviews || row.review_count || 0);
+  return `<div class="card card-pad"><div class="soft-icon blue" style="width:44px;height:44px">${icons.qr}</div><h3 style="margin-top:14px">${escapeHtml(name)}</h3><p>${escapeHtml(row.destination || row.url || "No destination saved")}</p><div class="kpi-row" style="grid-template-columns:1fr 1fr;margin-bottom:0"><div class="card kpi"><strong>${scans}</strong><p>Scans</p></div><div class="card kpi"><strong>${reviews}</strong><p>Reviews</p></div></div></div>`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, char => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#039;"
+  })[char]);
+}
+
 function recentReviews() {
   const activeReviews = getReviews();
   const body = activeReviews.length
@@ -393,6 +670,19 @@ function recentReviews() {
 }
 
 function analyticsTab() {
+  const summary = getSummary();
+  return `${head("Good Evening!", "See how your review requests are performing and get more reviews.", "analytics")}
+  ${dataNotice()}
+  <div class="card card-pad"><h2>How Are We Doing? <span class="badge">${state.period}</span></h2><div class="grid stat-grid section">
+    ${metric("Review Requests Sent", "0", "Connect GHL campaign data", "blue", "share")}
+    ${metric("Clicks to Review Sites", "0", "Connect GHL campaign data", "green", "trend")}
+    ${metric("Success Rate", "0%", "Connect GHL campaign data", "purple", "trend")}
+    ${metric("Private Messages", "0", "Connect GHL campaign data", "blue", "chat")}
+  </div></div>
+  <div class="grid two-grid section">
+    <div class="card card-pad"><h2>Review Performance</h2><div class="search-stats" style="text-align:center"><div><strong style="font-size:34px;color:#f59e0b">${summary.average.toFixed(1)}</strong><p>Rating</p></div><div><strong style="font-size:34px;color:#373ba3">${summary.total}</strong><p>Reviews</p></div><div><strong style="font-size:34px;color:#373ba3">${summary.responseRate}%</strong><p>Response Rate</p></div></div></div>
+    <div class="card card-pad empty-inline"><h2>Campaign Data Not Connected</h2><p>GHL invite/campaign events need to be synced into Supabase before this tab can show live sends, opens, clicks, QR scans, and form visits.</p></div>
+  </div>`;
   return `${head("Good Evening!", "See how your review requests are performing and get more reviews.", "analytics")}
   <div class="card card-pad"><h2>How Are We Doing? <span class="badge">This month</span></h2><div class="grid stat-grid section">${metric("Review Requests Sent", "11", "← -31.3% vs prior period", "blue", "share", true)}${metric("Clicks to Review Sites", "0", "← -100.0% vs prior period", "green", "trend", true)}${metric("Success Rate", "0.0%", "← -6.3% vs prior period", "purple", "trend", true)}${metric("Private Messages", "0", "→ +0% vs prior period", "blue", "chat")}</div></div>
   <div class="card card-pad section"><h2>What's Working Best? <span class="badge">This month</span></h2><div class="grid stat-grid section">${channel("Email Campaigns",4)}${channel("QR Code Scans",0)}${channel("SMS Campaigns",7)}${channel("Direct Form Visits",0)}</div></div>
@@ -448,6 +738,21 @@ function campaignInsightsPage() {
 }
 
 function inviteesPage() {
+  const invitees = liveData.invitees || [];
+  const counts = countBy(invitees, row => normalizeStatus(row.status));
+  return `<div class="page-head"><h1>Invitees</h1></div>
+  ${dataNotice()}
+  <div class="card card-pad"><p><strong>SUPABASE INVITEE DATA</strong></p><p>${invitees.length ? "Showing invitees from Supabase." : "No invitee rows found yet. Create/sync an invitees table from GHL to populate this page."}</p></div>
+  <div class="kpi-row">${[
+    `${invitees.length}|Total`,
+    `${counts.waiting || 0}|Waiting`,
+    `${counts.sent || 0}|Sent`,
+    `${counts.opened || 0}|Opened`,
+    `${counts.completed || 0}|Completed`,
+    `${counts.issue || counts.issues || 0}|Issues`
+  ].map(x=>{const [a,b]=x.split("|");return `<div class="card kpi"><strong>${a}</strong><p>${b}</p></div>`}).join("")}</div>
+  <div class="filter-row"><input class="search" placeholder="Search name, email, phone..." data-search-table="invitees"><strong>${invitees.length} invitees</strong><span style="flex:1"></span><button class="button" disabled>Export</button><button class="button primary" disabled>+ Invite</button></div>
+  <div class="card invite-table">${invitees.length ? inviteeTable(invitees) : emptyTable("No invitees in Supabase yet.")}</div>`;
   const names = ["David Tichich", "Jason Foraker", "Silvestre Flores", "Paola Jungbluth", "Will Valencia", "Mark Szerlip"];
   return `<div class="page-head"><h1>Invitees</h1></div>
   <div class="card card-pad"><p><strong>ESTIMATED CREDIT USAGE</strong></p><p>Email <span style="float:right">879 remaining after sends</span></p><div class="progress"><span style="width:3%;background:#3b82f6"></span></div><p style="margin-top:12px">SMS <span style="float:right">990 remaining after sends</span></p><div class="progress"><span style="width:1%;background:#22c55e"></span></div></div>
@@ -458,6 +763,11 @@ function inviteesPage() {
 }
 
 function requestReviewsPage() {
+  const campaigns = liveData.campaigns || [];
+  return `<div class="page-head"><h1>Request Reviews</h1></div>
+  ${dataNotice()}
+  <div class="filter-row"><input class="search" placeholder="Search campaigns..." data-search-table="campaigns"><span style="flex:1"></span><button class="button dark" disabled>+ New Campaign</button></div>
+  ${campaigns.length ? campaigns.map(campaignCard).join("") : `<div class="card card-pad empty-inline"><h2>No campaigns found in Supabase</h2><p>Sync GHL campaign/request-review records into a <strong>campaigns</strong> table to make this page live.</p></div>`}`;
   return `<div class="page-head"><h1>Request Reviews</h1></div><div class="filter-row"><input class="search" placeholder="Search campaigns..."><span style="flex:1"></span><button class="button dark">+ New Campaign</button></div>
   <div class="card card-pad"><div style="display:flex;justify-content:space-between;gap:20px"><div><h3>Review Campaign</h3><span class="badge" style="background:#dcfce7;color:#16a34a">● Active</span> <span class="muted">Created 2 months ago</span></div><button class="button green">✎ Edit</button></div>
   <div class="kpi-row">${["304|Sent","0|0% opened","98|32% clicked","49|Reviews","4|Opt-out","4.0 ★|Rating"].map(x=>{const [a,b]=x.split("|");return `<div class="card kpi"><strong>${a}</strong><p>${b}</p></div>`}).join("")}</div>
@@ -465,11 +775,20 @@ function requestReviewsPage() {
 }
 
 function feedbackFormsPage() {
+  const forms = liveData.forms || [];
+  return `<div class="page-head"><h1>Feedback Forms</h1></div>
+  ${dataNotice()}
+  <div class="filter-row"><input class="search" placeholder="Search forms..." data-search-table="forms" style="width:360px"><span style="flex:1"></span><button class="button primary" disabled>+ Create Form</button></div>
+  <div class="form-grid">${forms.length ? forms.map(formCard).join("") : `<div class="card card-pad empty-inline"><h2>No feedback forms found</h2><p>Create/sync rows in <strong>feedback_forms</strong> to show real forms here.</p></div>`}<div class="create-tile"><div><div class="soft-icon" style="margin:0 auto 16px">+</div><h3>Create Form</h3><p>Connect Supabase insert logic before enabling this.</p></div></div></div>`;
   return `<div class="page-head"><h1>Feedback Forms</h1></div><div class="filter-row"><input class="search" placeholder="Search forms..." style="width:360px"><span style="flex:1"></span><button class="button primary">+ Create Form</button></div>
   <div class="form-grid"><div class="card"><div class="form-card-preview"><div class="mini-form"><strong>How would you rate us?</strong><p>Please take a moment to review your experience with us.</p><div class="stars" style="color:#b8bec8">★★★★★</div><small>Powered by Airtime Heating Cooling and Air</small></div></div><div class="card-pad"><h3>Default</h3><p>▣ 19 Mar 2026</p><div class="grid two-grid" style="margin-top:16px;gap:8px"><button class="button primary">✎ Edit</button><button class="button">&lt;/&gt; Install</button></div></div></div><div class="create-tile"><div><div class="soft-icon" style="margin:0 auto 16px">+</div><h3>Create Form</h3><p>Capture feedback from another channel.</p></div></div></div>`;
 }
 
 function qrCodesPage() {
+  const qrCodes = liveData.qrCodes || [];
+  return `<div class="page-head"><h1>QR Codes</h1></div>
+  ${dataNotice()}
+  ${qrCodes.length ? `<div class="grid stat-grid">${qrCodes.map(qrCard).join("")}</div>` : `<div class="empty-state" style="min-height:620px"><div style="width:100%;max-width:850px"><div class="soft-icon blue" style="margin:0 auto 24px;width:58px;height:58px">${icons.qr}</div><h2>No QR Codes in Supabase Yet</h2><p>Sync or create rows in a <strong>qr_codes</strong> table to show real QR code records, scan counts, and conversion data here.</p><button class="button primary" style="margin-top:28px" disabled>Create QR Code after backend is connected</button></div></div>`}`;
   return `<div class="page-head"><h1>QR Codes</h1></div><div class="empty-state" style="min-height:760px"><div style="width:100%;max-width:1350px"><div class="soft-icon blue" style="margin:0 auto 24px;width:58px;height:58px">${icons.qr}</div><h2>Start Collecting Reviews with QR Codes</h2><p>QR codes make it super easy for customers to leave reviews. Simply scan and go - no<br>typing required!</p><div class="feature-row">${feature("Lightning Fast","Customers scan and review in seconds. No typing, no hassle - just point and shoot!","green")}${feature("Prevent Negative Reviews","Direct unhappy customers to private feedback forms instead of public review sites.","blue")}${feature("Track Performance","See exactly how many scans each QR code gets and which ones drive the most reviews.","purple")}</div><div class="card card-pad"><h2 style="text-align:left">Perfect for:</h2><div class="perfect section"><div>🍽<br><strong>Restaurants</strong></div><div>🏢<br><strong>Retail Stores</strong></div><div>📄<br><strong>Service Businesses</strong></div><div>💼<br><strong>Hotels</strong></div></div></div><button class="button primary" style="margin-top:48px;height:56px;font-size:18px">▦ Create Your First QR Code</button><p style="margin-top:14px">Get started in less than 2 minutes</p></div></div>`;
 }
 
@@ -487,6 +806,10 @@ function bindPageEvents() {
     state.page = "dashboard";
     state.tab = btn.dataset.tab;
     syncRoute();
+    render();
+  }));
+  document.querySelectorAll("[data-period]").forEach(btn => btn.addEventListener("click", () => {
+    state.period = btn.dataset.period;
     render();
   }));
 }
