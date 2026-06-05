@@ -42,8 +42,7 @@ const state = getInitialRoute();
 state.period = "All Time";
 const content = document.getElementById("appContent");
 const sidebar = document.getElementById("sidebar");
-const SUPABASE_URL = "https://lhhnjsfanofraeydxzsf.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxoaG5qc2Zhbm9mcmFleWR4enNmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0MjQ1MzEsImV4cCI6MjA5NjAwMDUzMX0.Pt8NML6JYmT72dTJn_XJR3XC_hoH9Lh2FpSWk5dnKzc";
+let supabaseConfig = null;
 const liveData = {
   loaded: false,
   error: null,
@@ -55,7 +54,11 @@ const liveData = {
   forms: null,
   qrCodes: null,
   locations: null,
-  connections: null
+  connections: null,
+  autoResponses: null,
+  socialProof: null,
+  appSettings: null,
+  helpArticles: null
 };
 
 const fallbackReviews = [];
@@ -74,7 +77,12 @@ function render() {
     invitees: inviteesPage,
     "request-reviews": requestReviewsPage,
     "feedback-forms": feedbackFormsPage,
-    "qr-codes": qrCodesPage
+    "qr-codes": qrCodesPage,
+    auto: autoRespondPage,
+    "social-proof": socialProofPage,
+    integrations: integrationsPage,
+    settings: settingsPage,
+    help: helpPage
   };
   content.innerHTML = (pages[state.page] || placeholderPage)();
   bindPageEvents();
@@ -83,7 +91,8 @@ function render() {
 
 async function loadLiveData() {
   try {
-    const [reviewRows, metricRows, performanceRows, invitees, campaigns, forms, qrCodes, locations, connections] = await Promise.all([
+    supabaseConfig = await loadRuntimeConfig();
+    const [reviewRows, metricRows, performanceRows, invitees, campaigns, forms, qrCodes, locations, connections, autoResponses, socialProof, appSettings, helpArticles] = await Promise.all([
       supabaseRest("reviews?select=*&order=review_time.desc"),
       supabaseRest("dashboard_metrics?select=*&limit=1"),
       supabaseRest("gbp_daily_metrics?select=*&order=metric_date.desc"),
@@ -92,7 +101,11 @@ async function loadLiveData() {
       safeSupabaseRest("feedback_forms?select=*&order=created_at.desc"),
       safeSupabaseRest("qr_codes?select=*&order=created_at.desc"),
       safeSupabaseRest("locations?select=*"),
-      safeSupabaseRest("api_connections?select=*")
+      safeSupabaseRest("api_connections?select=*"),
+      safeSupabaseRest("auto_responses?select=*&order=created_at.desc"),
+      safeSupabaseRest("social_proof_widgets?select=*&order=created_at.desc"),
+      safeSupabaseRest("app_settings?select=*"),
+      safeSupabaseRest("help_articles?select=*&order=created_at.desc")
     ]);
     liveData.reviews = reviewRows.map(mapReviewRow);
     liveData.metrics = metricRows[0] || null;
@@ -103,6 +116,10 @@ async function loadLiveData() {
     liveData.qrCodes = qrCodes || [];
     liveData.locations = locations || [];
     liveData.connections = connections || [];
+    liveData.autoResponses = autoResponses || [];
+    liveData.socialProof = socialProof || [];
+    liveData.appSettings = appSettings || [];
+    liveData.helpArticles = helpArticles || [];
     liveData.loaded = true;
     liveData.error = null;
   } catch (error) {
@@ -114,15 +131,29 @@ async function loadLiveData() {
 }
 
 async function supabaseRest(path) {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+  if (!supabaseConfig?.url || !supabaseConfig?.anonKey) {
+    throw new Error("Missing Supabase runtime config. Add SUPABASE_URL and SUPABASE_ANON_KEY in Vercel Environment Variables.");
+  }
+  const response = await fetch(`${supabaseConfig.url}/rest/v1/${path}`, {
     headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      apikey: supabaseConfig.anonKey,
+      Authorization: `Bearer ${supabaseConfig.anonKey}`,
       "Content-Type": "application/json"
     }
   });
   if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
   return response.json();
+}
+
+async function loadRuntimeConfig() {
+  if (supabaseConfig) return supabaseConfig;
+  const response = await fetch("/api/config", { headers: { Accept: "application/json" } });
+  if (!response.ok) throw new Error(`Config endpoint failed: ${response.status}`);
+  const config = await response.json();
+  return {
+    url: config.supabaseUrl,
+    anonKey: config.supabaseAnonKey
+  };
 }
 
 async function safeSupabaseRest(path) {
@@ -320,7 +351,7 @@ function dashboardPage() {
   return `${head("Good Evening!", "Here's your business reputation at a glance.", "overview")}
     ${dataNotice()}
     <div class="toolbar">
-      <h3>▣ Time Period</h3>
+      <h3>Time Period</h3>
       ${period()}
     </div>
     <section class="grid overview-grid">
@@ -328,17 +359,17 @@ function dashboardPage() {
         <div class="soft-icon amber">${icons.star}</div>
         <p>Overall Reputation</p>
         <div class="rating-big">${average} <span>/ 5</span></div>
-        <div class="positive">↑ +0.0 vs last month</div>
-        <div class="stars">★★★★★</div>
-        <div class="breakdown">View Breakdown⌄</div>
+        <div class="positive">Live from Supabase</div>
+        <div class="stars">${ratingStars(summary.average)}</div>
+        <div class="breakdown">View Breakdown</div>
       </div>
       <div class="stacked-metrics">
-        ${metric("Total Reviews", String(summary.total), "↑ +0% vs last month", "blue", "chat")}
-        ${metric("Response Rate", `${summary.responseRate}%`, "↑ +0.0% vs last month", "purple", "clock")}
+        ${metric("Total Reviews", String(summary.total), "Live from reviews", "blue", "chat")}
+        ${metric("Response Rate", `${summary.responseRate}%`, "Live from replies", "purple", "clock")}
       </div>
       <div class="stacked-metrics">
-        ${metric("Invite Conversion", `${summary.inviteConversion}%`, "↓ -0.1% vs last month", "green", "trend", true)}
-        ${metric("Avg. Response Time", summary.avgResponseTime, "↑ +0m vs last month", "blue", "clock")}
+        ${metric("Invite Conversion", `${summary.inviteConversion}%`, "Needs GHL events", "green", "trend")}
+        ${metric("Avg. Response Time", summary.avgResponseTime, "Needs reply timing", "blue", "clock")}
       </div>
     </section>
     ${blueHero()}
@@ -346,7 +377,6 @@ function dashboardPage() {
     ${reviewAnalyticsSections()}
     ${recentReviews()}`;
 }
-
 function period() {
   return `<div class="period">${["All Time","7 Days","30 Days","90 Days","This Month","Last Month","This Year","Custom"].map(x => `<button class="${state.period === x ? "active" : ""}" data-period="${x}">${x}</button>`).join("")}</div>`;
 }
@@ -746,25 +776,58 @@ function recentReviews() {
 
 function analyticsTab() {
   const summary = getSummary();
+  const campaigns = liveData.campaigns || [];
+  const invitees = liveData.invitees || [];
+  const sent = countMatching(invitees, ["sent", "invite_sent", "opened", "completed"]);
+  const opened = countMatching(invitees, ["opened", "completed"]);
+  const completed = countMatching(invitees, ["completed", "review_attempted"]);
+  const successRate = sent ? Math.round((completed / sent) * 1000) / 10 : 0;
   return `${head("Good Evening!", "See how your review requests are performing and get more reviews.", "analytics")}
   ${dataNotice()}
   <div class="card card-pad"><h2>How Are We Doing? <span class="badge">${state.period}</span></h2><div class="grid stat-grid section">
-    ${metric("Review Requests Sent", "0", "Connect GHL campaign data", "blue", "share")}
-    ${metric("Clicks to Review Sites", "0", "Connect GHL campaign data", "green", "trend")}
-    ${metric("Success Rate", "0%", "Connect GHL campaign data", "purple", "trend")}
-    ${metric("Private Messages", "0", "Connect GHL campaign data", "blue", "chat")}
+    ${metric("Review Requests Sent", String(sent), "From invitees", "blue", "share")}
+    ${metric("Clicks to Review Sites", String(completed), "Needs GHL click events", "green", "trend")}
+    ${metric("Success Rate", `${successRate}%`, "From completed invites", "purple", "trend")}
+    ${metric("Private Messages", "0", "Needs GHL conversations", "blue", "chat")}
   </div></div>
-  <div class="grid two-grid section">
-    <div class="card card-pad"><h2>Review Performance</h2><div class="search-stats" style="text-align:center"><div><strong style="font-size:34px;color:#f59e0b">${summary.average.toFixed(1)}</strong><p>Rating</p></div><div><strong style="font-size:34px;color:#373ba3">${summary.total}</strong><p>Reviews</p></div><div><strong style="font-size:34px;color:#373ba3">${summary.responseRate}%</strong><p>Response Rate</p></div></div></div>
-    <div class="card card-pad empty-inline"><h2>Campaign Data Not Connected</h2><p>GHL invite/campaign events need to be synced into Supabase before this tab can show live sends, opens, clicks, QR scans, and form visits.</p></div>
-  </div>`;
-  return `${head("Good Evening!", "See how your review requests are performing and get more reviews.", "analytics")}
-  <div class="card card-pad"><h2>How Are We Doing? <span class="badge">This month</span></h2><div class="grid stat-grid section">${metric("Review Requests Sent", "11", "← -31.3% vs prior period", "blue", "share", true)}${metric("Clicks to Review Sites", "0", "← -100.0% vs prior period", "green", "trend", true)}${metric("Success Rate", "0.0%", "← -6.3% vs prior period", "purple", "trend", true)}${metric("Private Messages", "0", "→ +0% vs prior period", "blue", "chat")}</div></div>
-  <div class="card card-pad section"><h2>What's Working Best? <span class="badge">This month</span></h2><div class="grid stat-grid section">${channel("Email Campaigns",4)}${channel("QR Code Scans",0)}${channel("SMS Campaigns",7)}${channel("Direct Form Visits",0)}</div></div>
-  <div class="card card-pad section"><h2>Campaign Activity Insights <span class="badge">All time</span></h2><p>Track how your email, SMS & WhatsApp campaigns are performing</p><div class="grid two-grid section">${delivery("Email","286 attempts","100%","286","0","23","8%")}${delivery("Sms","308 attempts","98.4%","303","5","83","27.4%")}</div></div>
-  <div class="card card-pad section"><h2>Where Customers Are Sent for Reviews <span class="badge">Last 12 months</span></h2>${barChart()}</div>
-  <div class="card card-pad section"><h2>When Are Customers Visiting Review Forms? <span class="badge">Last 30 days</span></h2>${lineMini()}<div class="notice" style="background:#eaf3ff;color:#2357c5">This shows when customers are most active on your review forms throughout the day.</div></div>
-  <div class="card card-pad section"><h2>Review Activity Over Time <span class="badge">Last 12 months</span></h2>${barChart()}</div>`;
+  <div class="card card-pad section"><h2>What's Working Best? <span class="badge">${state.period}</span></h2><div class="grid stat-grid section">
+    ${channel("Email Campaigns", countChannel(invitees, "email"))}
+    ${channel("QR Code Scans", (liveData.qrCodes || []).reduce((sum, row) => sum + Number(row.scans || row.scan_count || 0), 0))}
+    ${channel("SMS Campaigns", countChannel(invitees, "sms"))}
+    ${channel("Direct Form Visits", (liveData.forms || []).reduce((sum, row) => sum + Number(row.visits || row.visit_count || 0), 0))}
+  </div></div>
+  <div class="card card-pad section"><h2>Campaign Activity Insights <span class="badge">${state.period}</span></h2><p>Track how your email, SMS and WhatsApp campaigns are performing</p>${campaigns.length ? campaigns.map(campaignCard).join("") : emptyChart("No campaign rows in Supabase yet.")}</div>
+  <div class="card card-pad section"><h2>Where Customers Are Sent for Reviews <span class="badge">${state.period}</span></h2>${emptyBarChart("Waiting for review destination events from GHL.")}</div>
+  <div class="card card-pad section"><h2>When Are Customers Visiting Review Forms? <span class="badge">${state.period}</span></h2>${emptyLineChart("Waiting for form visit events.")}<div class="notice" style="background:#eaf3ff;color:#2357c5">This will show when customers are most active on review forms once form events are synced.</div></div>
+  <div class="card card-pad section"><h2>Review Activity Over Time <span class="badge">${state.period}</span></h2>${reviewVelocityChart(reviewsByMonth())}<div class="notice" style="background:#f8fafc;color:#4b5870">Bars come from Supabase review dates. GHL redirects can be added once campaign event rows exist.</div></div>`;
+}
+function countMatching(rows, statuses) {
+  const allowed = statuses.map(status => status.toLowerCase());
+  return rows.filter(row => allowed.includes(normalizeStatus(row.status))).length;
+}
+
+function countChannel(rows, channelName) {
+  return rows.filter(row => String(row.channel || row.type || "").toLowerCase() === channelName).length;
+}
+
+function emptyChart(message) {
+  return `<div class="empty-inline chart-note">${message}</div>`;
+}
+
+function emptyBarChart(message) {
+  return `<svg class="chart" viewBox="0 0 1180 320" preserveAspectRatio="none">
+    ${[70,120,170,220,270].map(y => `<line class="gridline" x1="45" x2="1140" y1="${y}" y2="${y}"/>`).join("")}
+    <line class="axis" x1="45" x2="1140" y1="270" y2="270"/>
+    <text x="460" y="160" class="chart-empty">${message}</text>
+  </svg>`;
+}
+
+function emptyLineChart(message) {
+  return `<svg class="chart" viewBox="0 0 1180 320" preserveAspectRatio="none">
+    ${[70,120,170,220,270].map(y => `<line class="gridline" x1="45" x2="1140" y1="${y}" y2="${y}"/>`).join("")}
+    <line class="axis" x1="45" x2="1140" y1="270" y2="270"/>
+    <text x="470" y="160" class="chart-empty">${message}</text>
+  </svg>`;
 }
 
 function channel(title, visits) {
@@ -853,4 +916,99 @@ function feedbackFormsPage() {
   const forms = liveData.forms || [];
   return `<div class="page-head"><h1>Feedback Forms</h1></div>
   ${dataNotice()}
-  <div class="filter-row"><input class="search" placeholder="Search forms..." data-search-table="forms" style="width:360px"><span style="flex:1"></span><button class="button primary" disabled>+ Create 
+  <div class="filter-row"><input class="search" placeholder="Search forms..." data-search-table="forms" style="width:360px"><span style="flex:1"></span><button class="button primary" disabled>+ Create Form</button></div>
+  <div class="form-grid">${forms.length ? forms.map(formCard).join("") : `<div class="card card-pad empty-inline"><h2>No feedback forms found</h2><p>Create/sync rows in <strong>feedback_forms</strong> to show real forms here.</p></div>`}<div class="create-tile"><div><div class="soft-icon" style="margin:0 auto 16px">+</div><h3>Create Form</h3><p>Connect Supabase insert logic before enabling this.</p></div></div></div>`;
+  return `<div class="page-head"><h1>Feedback Forms</h1></div><div class="filter-row"><input class="search" placeholder="Search forms..." style="width:360px"><span style="flex:1"></span><button class="button primary">+ Create Form</button></div>
+  <div class="form-grid"><div class="card"><div class="form-card-preview"><div class="mini-form"><strong>How would you rate us?</strong><p>Please take a moment to review your experience with us.</p><div class="stars" style="color:#b8bec8">★★★★★</div><small>Powered by Airtime Heating Cooling and Air</small></div></div><div class="card-pad"><h3>Default</h3><p>▣ 19 Mar 2026</p><div class="grid two-grid" style="margin-top:16px;gap:8px"><button class="button primary">✎ Edit</button><button class="button">&lt;/&gt; Install</button></div></div></div><div class="create-tile"><div><div class="soft-icon" style="margin:0 auto 16px">+</div><h3>Create Form</h3><p>Capture feedback from another channel.</p></div></div></div>`;
+}
+
+function qrCodesPage() {
+  const qrCodes = liveData.qrCodes || [];
+  return `<div class="page-head"><h1>QR Codes</h1></div>
+  ${dataNotice()}
+  ${qrCodes.length ? `<div class="grid stat-grid">${qrCodes.map(qrCard).join("")}</div>` : `<div class="empty-state" style="min-height:620px"><div style="width:100%;max-width:850px"><div class="soft-icon blue" style="margin:0 auto 24px;width:58px;height:58px">${icons.qr}</div><h2>No QR Codes in Supabase Yet</h2><p>Sync or create rows in a <strong>qr_codes</strong> table to show real QR code records, scan counts, and conversion data here.</p><button class="button primary" style="margin-top:28px" disabled>Create QR Code after backend is connected</button></div></div>`}`;
+  return `<div class="page-head"><h1>QR Codes</h1></div><div class="empty-state" style="min-height:760px"><div style="width:100%;max-width:1350px"><div class="soft-icon blue" style="margin:0 auto 24px;width:58px;height:58px">${icons.qr}</div><h2>Start Collecting Reviews with QR Codes</h2><p>QR codes make it super easy for customers to leave reviews. Simply scan and go - no<br>typing required!</p><div class="feature-row">${feature("Lightning Fast","Customers scan and review in seconds. No typing, no hassle - just point and shoot!","green")}${feature("Prevent Negative Reviews","Direct unhappy customers to private feedback forms instead of public review sites.","blue")}${feature("Track Performance","See exactly how many scans each QR code gets and which ones drive the most reviews.","purple")}</div><div class="card card-pad"><h2 style="text-align:left">Perfect for:</h2><div class="perfect section"><div>🍽<br><strong>Restaurants</strong></div><div>🏢<br><strong>Retail Stores</strong></div><div>📄<br><strong>Service Businesses</strong></div><div>💼<br><strong>Hotels</strong></div></div></div><button class="button primary" style="margin-top:48px;height:56px;font-size:18px">▦ Create Your First QR Code</button><p style="margin-top:14px">Get started in less than 2 minutes</p></div></div>`;
+}
+
+function feature(title, text, color) {
+  return `<div class="card card-pad" style="text-align:left"><div class="soft-icon ${color}" style="width:38px;height:38px">✦</div><h3 style="margin-top:14px">${title}</h3><p style="margin-top:18px">${text}</p></div>`;
+}
+
+function autoRespondPage() {
+  const rules = liveData.autoResponses || [];
+  return `<div class="page-head"><h1>Auto Respond</h1><p>Manage review response rules and reply templates.</p></div>
+    ${dataNotice()}
+    <div class="grid two-grid">
+      <div class="card card-pad"><h2>Response Rules</h2>${rules.length ? rules.map(rule => `<div class="source-row"><strong>${escapeHtml(rule.name || rule.rating_label || "Rule")}</strong><span class="badge">${escapeHtml(rule.status || "Draft")}</span></div>`).join("") : `<div class="empty-inline">No auto-response rules in Supabase yet. Add rows to <strong>auto_responses</strong>.</div>`}</div>
+      <div class="card card-pad"><h2>Responder Status</h2><div class="metric-lite"><strong>${rules.filter(rule => String(rule.status).toLowerCase() === "active").length}</strong><p>Active rules</p></div></div>
+    </div>`;
+}
+
+function socialProofPage() {
+  const widgets = liveData.socialProof || [];
+  return `<div class="page-head"><h1>Social Proof</h1><p>Display review widgets and testimonial feeds.</p></div>
+    ${dataNotice()}
+    <div class="grid stat-grid">${widgets.length ? widgets.map(widget => `<div class="card card-pad"><h3>${escapeHtml(widget.name || "Widget")}</h3><p>${escapeHtml(widget.type || "Review widget")}</p><div class="value" style="font-size:30px">${Number(widget.views || 0)}</div><p>Views</p></div>`).join("") : `<div class="card card-pad empty-inline"><h2>No social proof widgets yet</h2><p>Add rows to <strong>social_proof_widgets</strong>.</p></div>`}</div>`;
+}
+
+function integrationsPage() {
+  const connections = liveData.connections || [];
+  const labels = ["Google Business Profile", "GoHighLevel", "ServiceTitan", "Meta Ads"];
+  return `<div class="page-head"><h1>Integrations</h1><p>Connection status for the systems feeding this dashboard.</p></div>
+    ${dataNotice()}
+    <div class="grid two-grid">${labels.map(label => {
+      const row = connections.find(connection => String(connection.provider || connection.name || "").toLowerCase().includes(label.split(" ")[0].toLowerCase()));
+      return `<div class="card card-pad"><h3>${label}</h3><p>${row ? escapeHtml(row.status || "Connected") : "Not connected in Supabase yet"}</p><span class="badge">${row ? "Configured" : "Waiting"}</span></div>`;
+    }).join("")}</div>`;
+}
+
+function settingsPage() {
+  const settings = liveData.appSettings || [];
+  return `<div class="page-head"><h1>Settings</h1><p>Business and dashboard settings.</p></div>
+    ${dataNotice()}
+    <div class="card card-pad">${settings.length ? `<table class="table"><thead><tr><th>Setting</th><th>Value</th></tr></thead><tbody>${settings.map(row => `<tr><td>${escapeHtml(row.key || row.name || row.setting || "Setting")}</td><td>${escapeHtml(row.value || row.setting_value || "")}</td></tr>`).join("")}</tbody></table>` : `<div class="empty-inline">No settings rows yet. Add rows to <strong>app_settings</strong>.</div>`}</div>`;
+}
+
+function helpPage() {
+  const articles = liveData.helpArticles || [];
+  return `<div class="page-head"><h1>Help</h1><p>Support articles and dashboard notes.</p></div>
+    ${dataNotice()}
+    <div class="grid two-grid">${articles.length ? articles.map(article => `<div class="card card-pad"><h3>${escapeHtml(article.title || "Help Article")}</h3><p>${escapeHtml(article.summary || article.body || "")}</p></div>`).join("") : `<div class="card card-pad empty-inline"><h2>No help articles yet</h2><p>Add rows to <strong>help_articles</strong>.</p></div>`}</div>`;
+}
+function placeholderPage() {
+  const title = state.page.split("-").map(x => x[0].toUpperCase() + x.slice(1)).join(" ");
+  return `<div class="empty-state"><div><h1>${title}</h1><p>This page shell is ready for the matching GHL route or backend data.</p></div></div>`;
+}
+
+function bindPageEvents() {
+  document.querySelectorAll("[data-tab]").forEach(btn => btn.addEventListener("click", () => {
+    state.page = "dashboard";
+    state.tab = btn.dataset.tab;
+    syncRoute();
+    render();
+  }));
+  document.querySelectorAll("[data-period]").forEach(btn => btn.addEventListener("click", () => {
+    state.period = btn.dataset.period;
+    render();
+  }));
+}
+
+document.querySelectorAll(".nav-item,.subnav button").forEach(btn => btn.addEventListener("click", () => {
+  state.page = btn.dataset.page;
+  state.tab = btn.dataset.tab || state.tab || "overview";
+  if (state.page !== "dashboard") state.tab = "overview";
+  syncRoute();
+  render();
+}));
+document.getElementById("menuToggle").addEventListener("click", () => sidebar.classList.toggle("open"));
+render();
+loadLiveData();
+
+
+
+
+
+
+
+
+
