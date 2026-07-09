@@ -221,5 +221,12 @@ Add these in Vercel Project Settings > Environment Variables:
 
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `DEFAULT_LOCATION_ID`
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_REDIRECT_URI`
 
 GitHub repository secrets are not automatically available to a Vercel deployment unless you deploy through GitHub Actions. For a normal Vercel Git integration, add them in Vercel.
+
+Use `GOOGLE_LIVE_SETUP.md` for the exact Google OAuth connection steps.

@@ -956,6 +956,10 @@ function integrationsPage() {
   const labels = ["Google Business Profile", "GoHighLevel", "ServiceTitan", "Meta Ads"];
   return `<div class="page-head"><h1>Integrations</h1><p>Connection status for the systems feeding this dashboard.</p></div>
     ${dataNotice()}
+    <div class="card card-pad" style="margin-bottom:22px;display:flex;align-items:center;gap:18px;justify-content:space-between;flex-wrap:wrap">
+      <div><h2>Google Business Profile</h2><p>Connect with OAuth, then run the sync endpoint to fill Supabase with live reviews and analytics.</p></div>
+      <a class="button primary" href="/api/google/connect">Connect Google</a>
+    </div>
     <div class="grid two-grid">${labels.map(label => {
       const row = connections.find(connection => String(connection.provider || connection.name || "").toLowerCase().includes(label.split(" ")[0].toLowerCase()));
       return `<div class="card card-pad"><h3>${label}</h3><p>${row ? escapeHtml(row.status || "Connected") : "Not connected in Supabase yet"}</p><span class="badge">${row ? "Configured" : "Waiting"}</span></div>`;
