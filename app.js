@@ -359,17 +359,16 @@ function dashboardPage() {
         <div class="soft-icon amber">${icons.star}</div>
         <p>Overall Reputation</p>
         <div class="rating-big">${average} <span>/ 5</span></div>
-        <div class="positive">Live from Supabase</div>
         <div class="stars">${ratingStars(summary.average)}</div>
         <div class="breakdown">View Breakdown</div>
       </div>
       <div class="stacked-metrics">
-        ${metric("Total Reviews", String(summary.total), "Live from reviews", "blue", "chat")}
-        ${metric("Response Rate", `${summary.responseRate}%`, "Live from replies", "purple", "clock")}
+        ${metric("Total Reviews", String(summary.total), "", "blue", "chat")}
+        ${metric("Response Rate", `${summary.responseRate}%`, "", "purple", "clock")}
       </div>
       <div class="stacked-metrics">
-        ${metric("Invite Conversion", `${summary.inviteConversion}%`, "Needs GHL events", "green", "trend")}
-        ${metric("Avg. Response Time", summary.avgResponseTime, "Needs reply timing", "blue", "clock")}
+        ${metric("Invite Conversion", `${summary.inviteConversion}%`, "", "green", "trend")}
+        ${metric("Avg. Response Time", summary.avgResponseTime, "", "blue", "clock")}
       </div>
     </section>
     ${blueHero()}
@@ -382,8 +381,11 @@ function period() {
 }
 
 function metric(label, value, delta, color, icon, negative = false) {
+  const deltaHtml = delta
+    ? `<div class="${negative ? "negative" : "positive"}">${delta.replace(" vs", "</span><span class='muted'> vs")}</span></div>`
+    : "";
   return `<div class="card card-pad metric">
-    <div><p>${label}</p><div class="value">${value}</div><div class="${negative ? "negative" : "positive"}">${delta.replace(" vs", "</span><span class='muted'> vs")}</span></div></div>
+    <div><p>${label}</p><div class="value">${value}</div>${deltaHtml}</div>
     <div class="soft-icon ${color}">${icons[icon]}</div>
   </div>`;
 }
@@ -615,15 +617,19 @@ function performanceTrendChart() {
     ["calls", "#18bf8f", ["calls", "call_clicks", "business_conversations"]]
   ];
   const allDates = [...new Set(rows.map(row => row.metric_date || row.date || row.created_at).filter(Boolean))].sort();
-  const max = Math.max(1, ...rows.map(metricValue));
+  const max = chartMax(allDates, byMetric, series.map(([, , aliases]) => aliases));
   const labels = allDates.length ? allDates : ["Start", "", "", "", "Now"];
-  return `<svg class="chart" viewBox="0 0 1280 330" preserveAspectRatio="none">
+  return `<svg class="chart performance-chart" viewBox="0 0 1280 330" preserveAspectRatio="none">
+    <defs><clipPath id="performanceChartClip"><rect x="40" y="35" width="1200" height="220" rx="0"/></clipPath></defs>
     ${[50,100,150,200,250].map(y => `<line class="gridline" x1="40" x2="1240" y1="${y}" y2="${y}"/>`).join("")}
     <line class="axis" x1="40" x2="1240" y1="255" y2="255"/>
+    <g clip-path="url(#performanceChartClip)">
     ${series.map(([name, color, aliases]) => {
       const points = chartPoints(allDates, byMetric, aliases, max);
       return points ? `<polyline points="${points}" fill="none" stroke="${color}" stroke-width="3"/>` : "";
     }).join("")}
+    </g>
+    ${chartHoverAreas(allDates, byMetric, series)}
     ${labels.slice(0, 10).map((m,i)=>`<text x="${40+i*(1180/Math.max(1, labels.slice(0, 10).length - 1))}" y="292">${String(m).slice(0, 10)}</text>`).join("")}
     ${rows.length ? "" : `<text x="520" y="160" class="chart-empty">No GBP analytics rows yet</text>`}
   </svg>`;
@@ -647,9 +653,33 @@ function chartPoints(dates, byMetric, aliases, max) {
   if (!values.some(Boolean)) return "";
   return values.map((value, index) => {
     const x = 40 + index * (1180 / Math.max(1, dates.length - 1));
-    const y = 255 - (value / max) * 210;
+    const y = Math.max(35, Math.min(255, 255 - (value / max) * 210));
     return `${x},${y}`;
   }).join(" ");
+}
+
+function chartMax(dates, byMetric, aliasGroups) {
+  const totals = aliasGroups.flatMap(aliases => {
+    const lowerAliases = aliases.map(alias => alias.toLowerCase());
+    return dates.map(date => lowerAliases.reduce((sum, alias) => sum + (byMetric[alias]?.[date] || 0), 0));
+  });
+  return Math.max(1, ...totals);
+}
+
+function chartHoverAreas(dates, byMetric, series) {
+  if (!dates.length) return "";
+  const step = 1180 / Math.max(1, dates.length - 1);
+  const width = Math.max(8, step);
+  return dates.map((date, index) => {
+    const x = 40 + index * step - width / 2;
+    const values = series.map(([name, color, aliases]) => {
+      const value = aliases
+        .map(alias => alias.toLowerCase())
+        .reduce((sum, alias) => sum + (byMetric[alias]?.[date] || 0), 0);
+      return `data-${name}="${value}" data-${name}-color="${color}"`;
+    }).join(" ");
+    return `<rect class="chart-hover-zone" x="${Math.max(40, x)}" y="35" width="${Math.min(width, 1240 - Math.max(40, x))}" height="220" data-date="${escapeHtml(date)}" ${values}/>`;
+  }).join("");
 }
 
 function breakdownCard(title, sub, type) {
@@ -995,6 +1025,49 @@ function bindPageEvents() {
     state.period = btn.dataset.period;
     render();
   }));
+  bindPerformanceTooltips();
+}
+
+function bindPerformanceTooltips() {
+  const zones = document.querySelectorAll(".chart-hover-zone");
+  if (!zones.length) return;
+
+  let tooltip = document.getElementById("chartTooltip");
+  if (!tooltip) {
+    tooltip = document.createElement("div");
+    tooltip.id = "chartTooltip";
+    tooltip.className = "chart-tooltip";
+    document.body.appendChild(tooltip);
+  }
+
+  const rows = [
+    ["Impressions", "impressions", "#6b6cf6"],
+    ["Website Clicks", "website", "#ff4747"],
+    ["Direction Requests", "directions", "#f59e0b"],
+    ["Call Clicks", "calls", "#18bf8f"]
+  ];
+
+  const updateTooltip = (event, zone) => {
+    tooltip.innerHTML = `<strong>${escapeHtml(zone.dataset.date || "")}</strong>${rows.map(([label, key, fallbackColor]) => {
+      const value = formatNumber(Number(zone.dataset[key] || 0));
+      const color = zone.dataset[`${key}Color`] || fallbackColor;
+      return `<span><i style="background:${color}"></i>${label}<b>${value}</b></span>`;
+    }).join("")}`;
+
+    const offset = 16;
+    const rect = tooltip.getBoundingClientRect();
+    const left = Math.min(window.innerWidth - rect.width - 12, event.clientX + offset);
+    const top = Math.max(12, event.clientY - rect.height - offset);
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+    tooltip.classList.add("show");
+  };
+
+  zones.forEach(zone => {
+    zone.addEventListener("mousemove", event => updateTooltip(event, zone));
+    zone.addEventListener("mouseenter", event => updateTooltip(event, zone));
+    zone.addEventListener("mouseleave", () => tooltip.classList.remove("show"));
+  });
 }
 
 document.querySelectorAll(".nav-item,.subnav button").forEach(btn => btn.addEventListener("click", () => {

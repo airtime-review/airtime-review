@@ -30,11 +30,17 @@ module.exports = async function handler(req, res) {
 
     let reviewCount = 0;
     let metricCount = 0;
+    let skippedLocations = 0;
 
     for (const location of gbpLocations) {
       const googleLocationId = location.google_location_id || cleanGoogleLocationId(location.name);
       const googleAccountId = location.google_account_id || connection.google_account_id;
       const internalLocationId = location.location_id || connection.location_id || null;
+
+      if (!googleLocationId || !googleAccountId) {
+        skippedLocations += 1;
+        continue;
+      }
 
       const reviewResult = await syncReviews({
         accessToken,
@@ -54,7 +60,7 @@ module.exports = async function handler(req, res) {
 
     await rebuildDashboardMetrics();
 
-    res.status(200).json({ ok: true, reviewCount, metricCount });
+    res.status(200).json({ ok: true, reviewCount, metricCount, skippedLocations });
   } catch (error) {
     sendError(res, error);
   }
@@ -140,13 +146,13 @@ async function syncPerformance({ accessToken, googleLocationId, internalLocation
 
   if (!rows.length) return 0;
 
-await supabase("gbp_daily_metrics?on_conflict=location_id,metric_date,metric_name", {
-  method: "POST",
-  headers: {
-    Prefer: "resolution=merge-duplicates,return=representation"
-  },
-  body: JSON.stringify(rows)
-});
+  await supabase("gbp_daily_metrics?on_conflict=location_id,metric_date,metric_name", {
+    method: "POST",
+    headers: {
+      Prefer: "resolution=merge-duplicates,return=representation"
+    },
+    body: JSON.stringify(rows)
+  });
 
   return rows.length;
 }
