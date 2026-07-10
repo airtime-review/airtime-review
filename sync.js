@@ -84,11 +84,25 @@ module.exports = async function handler(req, res) {
 
 async function syncReviews({ accessToken, googleAccountId, googleLocationId, internalLocationId }) {
   const parent = `accounts/${googleAccountId}/locations/${googleLocationId}`;
-  const data = await googleFetch(
-    `https://mybusiness.googleapis.com/v4/${parent}/reviews?pageSize=50&orderBy=updateTime%20desc`,
-    accessToken
-  );
-  const reviews = data.reviews || [];
+  const reviews = [];
+  const params = new URLSearchParams({
+    pageSize: "50",
+    orderBy: "updateTime desc"
+  });
+
+  do {
+    const data = await googleFetch(
+      `https://mybusiness.googleapis.com/v4/${parent}/reviews?${params.toString()}`,
+      accessToken
+    );
+    reviews.push(...(data.reviews || []));
+    if (data.nextPageToken) {
+      params.set("pageToken", data.nextPageToken);
+    } else {
+      params.delete("pageToken");
+    }
+  } while (params.has("pageToken"));
+
   if (!reviews.length) return 0;
 
   for (const review of reviews) {
