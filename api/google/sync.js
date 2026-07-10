@@ -40,6 +40,8 @@ module.exports = async function handler(req, res) {
     let metricCount = 0;
     let keywordCount = 0;
     let skippedLocations = 0;
+    let googleReviewTotal = null;
+    let googleAverageRating = null;
 
     for (const location of gbpLocations) {
       const googleLocationId = location.google_location_id || cleanGoogleLocationId(location.name);
@@ -57,7 +59,9 @@ module.exports = async function handler(req, res) {
         googleLocationId,
         internalLocationId
       });
-      reviewCount += reviewResult;
+      reviewCount += reviewResult.syncedCount;
+      if (reviewResult.totalReviewCount) googleReviewTotal = Math.max(googleReviewTotal || 0, reviewResult.totalReviewCount);
+      if (reviewResult.averageRating) googleAverageRating = reviewResult.averageRating;
 
       const metricResult = await syncPerformance({
         accessToken,
@@ -74,9 +78,9 @@ module.exports = async function handler(req, res) {
       keywordCount += keywordResult;
     }
 
-    await rebuildDashboardMetrics();
+    await rebuildDashboardMetrics({ googleReviewTotal, googleAverageRating });
 
-    res.status(200).json({ ok: true, reviewCount, metricCount, keywordCount, skippedLocations });
+    res.status(200).json({ ok: true, reviewCount, googleReviewTotal, googleAverageRating, metricCount, keywordCount, skippedLocations });
   } catch (error) {
     sendError(res, error);
   }
@@ -84,12 +88,30 @@ module.exports = async function handler(req, res) {
 
 async function syncReviews({ accessToken, googleAccountId, googleLocationId, internalLocationId }) {
   const parent = `accounts/${googleAccountId}/locations/${googleLocationId}`;
-  const data = await googleFetch(
-    `https://mybusiness.googleapis.com/v4/${parent}/reviews?pageSize=50&orderBy=updateTime%20desc`,
-    accessToken
-  );
-  const reviews = data.reviews || [];
-  if (!reviews.length) return 0;
+  const reviews = [];
+  let totalReviewCount = null;
+  let averageRating = null;
+  const params = new URLSearchParams({
+    pageSize: "50",
+    orderBy: "updateTime desc"
+  });
+
+  do {
+    const data = await googleFetch(
+      `https://mybusiness.googleapis.com/v4/${parent}/reviews?${params.toString()}`,
+      accessToken
+    );
+    if (data.totalReviewCount) totalReviewCount = Number(data.totalReviewCount);
+    if (data.averageRating) averageRating = Number(data.averageRating);
+    reviews.push(...(data.reviews || []));
+    if (data.nextPageToken) {
+      params.set("pageToken", data.nextPageToken);
+    } else {
+      params.delete("pageToken");
+    }
+  } while (params.has("pageToken"));
+
+  if (!reviews.length) return { syncedCount: 0, totalReviewCount, averageRating };
 
   for (const review of reviews) {
     const externalId = review.reviewId || review.name || `${googleLocationId}-${review.updateTime}`;
@@ -120,7 +142,7 @@ async function syncReviews({ accessToken, googleAccountId, googleLocationId, int
     }
   }
 
-  return reviews.length;
+  return { syncedCount: reviews.length, totalReviewCount, averageRating };
 }
 
 async function syncPerformance({ accessToken, googleLocationId, internalLocationId }) {
@@ -185,7 +207,7 @@ async function syncSearchKeywords({ accessToken, googleLocationId, internalLocat
     const keywordItems = await fetchKeywordMonth({ accessToken, googleLocationId, monthDate });
     for (const item of keywordItems) {
       const searchTerm = item.searchKeyword || "";
-      const impressions = Number(item.insightsValue?.value || item.insightsValue?.threshold || 0);
+      const impressions = parseInsightsValue(item.insightsValue);
       if (!searchTerm || !month || !impressions) continue;
       rows.push({
         location_id: internalLocationId,
@@ -241,10 +263,17 @@ async function fetchKeywordMonth({ accessToken, googleLocationId, monthDate }) {
 function getKeywordMonths() {
   const end = new Date();
   const months = [];
-  for (let offset = 0; offset < 6; offset += 1) {
+  for (let offset = 0; offset < 18; offset += 1) {
     months.push(new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() - offset, 1)));
   }
   return months;
+}
+
+function parseInsightsValue(insightsValue) {
+  const raw = insightsValue?.value ?? insightsValue?.threshold ?? 0;
+  if (typeof raw === "number") return raw;
+  const match = String(raw).match(/\d+/);
+  return match ? Number(match[0]) : 0;
 }
 
 function isBrandSearch(searchTerm) {
@@ -261,30 +290,24 @@ function googleMonthToIso(month) {
   return `${year}-${String(monthNumber).padStart(2, "0")}-01`;
 }
 
-async function rebuildDashboardMetrics() {
+async function rebuildDashboardMetrics({ googleReviewTotal = null, googleAverageRating = null } = {}) {
   const reviews = await supabase("reviews?select=rating,status,reply_text");
   const total = reviews.length;
   const ratingSum = reviews.reduce((sum, review) => sum + Number(review.rating || 0), 0);
   const replied = reviews.filter(review => review.reply_text || review.status === "replied").length;
+  const displayTotal = googleReviewTotal || total;
+  const displayAverage = googleAverageRating || (total ? Math.round((ratingSum / total) * 10) / 10 : 0);
   const row = {
-    total_reviews: total,
-    average_rating: total ? Math.round((ratingSum / total) * 10) / 10 : 0,
+    total_reviews: displayTotal,
+    average_rating: displayAverage,
     response_rate: total ? Math.round((replied / total) * 1000) / 10 : 0,
     invite_conversion: 0,
     avg_response_time: "-",
     updated_at: new Date().toISOString()
   };
 
-  const existing = await supabase("dashboard_metrics?select=id&limit=1");
-  if (existing[0]?.id) {
-    await supabase(`dashboard_metrics?id=eq.${existing[0].id}`, {
-      method: "PATCH",
-      body: JSON.stringify(row)
-    });
-  } else {
-    await supabase("dashboard_metrics", {
-      method: "POST",
-      body: JSON.stringify(row)
-    });
-  }
+  await supabase("dashboard_metrics", {
+    method: "POST",
+    body: JSON.stringify(row)
+  });
 }
