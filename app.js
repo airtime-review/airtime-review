@@ -1,4 +1,4 @@
-const icons = {
+﻿const icons = {
   home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg>',
   star: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9Z"/></svg>',
   bot: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="8" width="14" height="11" rx="2"/><path d="M12 4v4"/><path d="M9 13h.01M15 13h.01"/><path d="M8 8V6h8v2"/></svg>',
@@ -58,6 +58,7 @@ const liveData = {
   autoResponses: null,
   socialProof: null,
   appSettings: null,
+  searchKeywords: null,
   helpArticles: null
 };
 
@@ -92,7 +93,7 @@ function render() {
 async function loadLiveData() {
   try {
     supabaseConfig = await loadRuntimeConfig();
-    const [reviewRows, metricRows, performanceRows, invitees, campaigns, forms, qrCodes, locations, connections, autoResponses, socialProof, appSettings, helpArticles] = await Promise.all([
+    const [reviewRows, metricRows, performanceRows, invitees, campaigns, forms, qrCodes, locations, connections, autoResponses, socialProof, appSettings, searchKeywords, helpArticles] = await Promise.all([
       supabaseRest("reviews?select=*&order=review_time.desc"),
       supabaseRest("dashboard_metrics?select=*&limit=1"),
       supabaseRest("gbp_daily_metrics?select=*&order=metric_date.desc"),
@@ -105,6 +106,7 @@ async function loadLiveData() {
       safeSupabaseRest("auto_responses?select=*&order=created_at.desc"),
       safeSupabaseRest("social_proof_widgets?select=*&order=created_at.desc"),
       safeSupabaseRest("app_settings?select=*"),
+      safeSupabaseRest("gbp_search_keywords?select=*&order=month.desc&order=impressions.desc"),
       safeSupabaseRest("help_articles?select=*&order=created_at.desc")
     ]);
     liveData.reviews = reviewRows.map(mapReviewRow);
@@ -119,6 +121,7 @@ async function loadLiveData() {
     liveData.autoResponses = autoResponses || [];
     liveData.socialProof = socialProof || [];
     liveData.appSettings = appSettings || [];
+    liveData.searchKeywords = searchKeywords || [];
     liveData.helpArticles = helpArticles || [];
     liveData.loaded = true;
     liveData.error = null;
@@ -245,8 +248,65 @@ function getPerformanceRows() {
   return filterByPeriod(liveData.performance || [], row => row.metric_date || row.date || row.created_at);
 }
 
+function getSearchKeywordRows() {
+  return filterByPeriod(liveData.searchKeywords || [], row => row.month || row.metric_date || row.created_at);
+}
+
+function getSearchKeywordSummary() {
+  const grouped = new Map();
+  getSearchKeywordRows().forEach(row => {
+    const term = String(row.search_term || row.keyword || "").trim();
+    if (!term) return;
+    const key = term.toLowerCase();
+    const existing = grouped.get(key) || {
+      term,
+      impressions: 0,
+      isBrand: false,
+      month: row.month || row.metric_date || ""
+    };
+    existing.impressions += Number(row.impressions || row.metric_value || row.value || 0) || 0;
+    existing.isBrand = existing.isBrand || Boolean(row.is_brand);
+    if ((row.month || "") > existing.month) existing.month = row.month;
+    grouped.set(key, existing);
+  });
+
+  const terms = [...grouped.values()].sort((a, b) => b.impressions - a.impressions);
+  const totalImpressions = terms.reduce((sum, row) => sum + row.impressions, 0);
+  const brandImpressions = terms.filter(row => row.isBrand).reduce((sum, row) => sum + row.impressions, 0);
+  const discoveryImpressions = Math.max(0, totalImpressions - brandImpressions);
+  return {
+    terms,
+    totalTerms: terms.length,
+    totalImpressions,
+    brandPercent: totalImpressions ? Math.round((brandImpressions / totalImpressions) * 100) : 0,
+    discoveryPercent: totalImpressions ? Math.round((discoveryImpressions / totalImpressions) * 100) : 0
+  };
+}
+
 function metricValue(row) {
   return Number(row.metric_value ?? row.value ?? row.count ?? 0) || 0;
+}
+
+function metricLabel(name) {
+  const key = String(name || "").toLowerCase();
+  const labels = {
+    business_impressions_mobile_search: "Mobile Google Search Views",
+    business_impressions_desktop_search: "Desktop Google Search Views",
+    business_impressions_mobile_maps: "Mobile Google Maps Views",
+    business_impressions_desktop_maps: "Desktop Google Maps Views",
+    website_clicks: "Website Clicks",
+    business_website_clicks: "Website Clicks",
+    business_direction_requests: "Direction Requests",
+    direction_requests: "Direction Requests",
+    call_clicks: "Call Button Clicks",
+    business_conversations: "Message / Conversation Clicks",
+    impressions: "Profile Views",
+    business_impressions: "Profile Views"
+  };
+  return labels[key] || String(name || "Metric")
+    .replace(/^business_/, "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, letter => letter.toUpperCase());
 }
 
 function metricTotal(names) {
@@ -392,64 +452,69 @@ function metric(label, value, delta, color, icon, negative = false) {
 
 function blueHero() {
   const summary = getSummary();
-  const reviews = getReviews();
   const last30 = countReviewsBetween(30, 0);
   const previous30 = countReviewsBetween(60, 30);
-  const trendText = previous30 ? `${Math.abs(Math.round(((last30 - previous30) / previous30) * 100))}% ${last30 >= previous30 ? "increase" : "decrease"}` : "No previous data";
   const average = summary.average.toFixed(1);
+  const reviewGoal = getNumericSetting(["review_goal_count", "target_review_count", "next_review_goal_reviews"]);
+  const reviewsNeeded = reviewGoal > summary.total
+    ? Math.ceil(reviewGoal - summary.total)
+    : reviewsNeededForDisplayedRating(summary.average, summary.total);
+  const trendPercent = previous30 ? Math.round(((last30 - previous30) / previous30) * 100) : null;
+  const trendGood = last30 >= previous30 && last30 > 0;
+  const trendText = trendPercent === null
+    ? "No previous data"
+    : `${trendPercent >= 0 ? "&uarr;" : "&darr;"} ${Math.abs(trendPercent)}% ${trendPercent >= 0 ? "increase" : "decrease"}`;
+  const forecastMonths = last30 > 0 && reviewsNeeded > 0 ? Math.max(1, Math.ceil(reviewsNeeded / last30)) : 0;
+  const progressPercent = reviewsNeeded > 0 ? Math.min(100, Math.round((last30 / reviewsNeeded) * 100)) : 100;
+  const revenuePerReview = getNumericSetting(["revenue_per_review_month", "monthly_revenue_per_review", "review_monthly_value"]);
+  const potentialRevenue = revenuePerReview > 0 && reviewsNeeded > 0 ? reviewsNeeded * revenuePerReview : 0;
+  const visibilityBoost = Math.max(0, Math.round((5 - Number(average)) * 100));
+  const ratingDelta = Math.max(0, 5 - Number(average)).toFixed(1);
   return `<section class="blue-panel">
     <div class="hero-grid">
       <div>
         <span class="pill">G Google</span>
-        <h2>${summary.total ? "Keep collecting reviews" : "Waiting for live reviews"}</h2>
-        <p>${summary.total ? `Current live rating is <strong>${average}</strong> from <strong>${summary.total}</strong> reviews.` : "Once Supabase has Google reviews, this section will update automatically."}</p>
+        <h2>${reviewsNeeded ? `Almost there! Keep going! <span class="hero-accent">&#127919;</span>` : "You're at the goal. Keep going!"}</h2>
+        <p>${reviewsNeeded ? `Just <strong>${reviewsNeeded} more reviews</strong> to reach <strong>5.0!</strong>` : `Current live rating is <strong>${average}</strong> from <strong>${summary.total}</strong> reviews.`}</p>
         <div class="notice"><strong>Why this matters:</strong> Higher ratings help you show up first when people search on Google Maps and Google Search. More stars = more customers finding your business!</div>
-        <div class="notice"><strong>Live data status</strong><br>${reviews.length ? "This panel is using reviews from Supabase." : "No synced review rows for this selected period yet."}</div>
+        <div class="notice momentum ${trendGood ? "momentum-good" : "momentum-watch"}"><strong>${trendGood ? "You're on Fire!" : "Let's Pick Up the Pace"}</strong><br>${trendGood ? "Both your review count and rating are moving in the right direction. Keep this momentum going!" : "Your review collection has slowed down. Time to ask more customers!"}</div>
         <div class="blue-stats">
           <div class="blue-card"><small>LAST 30 DAYS</small><strong>${last30}</strong>reviews<br><b style="color:#ffe25c">${trendText}</b></div>
           <div class="blue-card"><small>PREVIOUS 30 DAYS</small><strong>${previous30}</strong>reviews</div>
         </div>
         <div class="blue-card">
-          <small>REVIEW MOMENTUM</small>
-          <h3>${last30 ? `${last30} review${last30 === 1 ? "" : "s"} collected in the last 30 days.` : "No reviews collected in the last 30 days."}</h3>
-          <div class="progress"><span style="width:${Math.min(100, last30 * 5)}%"></span></div>
+          <small>YOUR FORECAST</small>
+          <h3>${forecastMonths ? `At your pace, you'll hit 5.0 &#9733; in ${forecastMonths} month${forecastMonths === 1 ? "" : "s"}.` : reviewsNeeded ? "Collect new reviews to start the forecast." : "You have reached the 5.0 display goal."}</h3>
+          <div class="forecast-row"><strong>${forecastMonths || "-"}</strong><span>months</span><em>&rarr;</em><strong>5.0 &#9733;</strong><span>rating</span></div>
+          <div class="progress-label"><span>Keep up the pace!</span><b>${reviewsNeeded} reviews needed</b></div>
+          <div class="progress"><span style="width:${progressPercent}%"></span></div>
         </div>
+        <div class="progress-label milestone"><span>Progress to next milestone</span><b>${progressPercent}%</b></div>
+        <div class="progress milestone-bar"><span style="width:${progressPercent}%"></span></div>
       </div>
-      <div class="blue-card" style="align-self:center;text-align:center;padding:44px">
+      <div class="blue-card rating-side">
         <small>CURRENT RATING</small>
         <div class="rating-big">${average} &#9733;</div>
         <div class="stars" style="color:white">${ratingStars(summary.average)}</div>
         <hr style="border-color:rgba(255,255,255,.22)">
         <div class="blue-stats"><div><strong>${summary.total}</strong><small>TOTAL REVIEWS</small></div><div><strong>5.0</strong><small>NEXT GOAL</small></div></div>
-        <div class="notice">Revenue calculator is not connected yet.<br><button class="button" style="margin-top:12px;background:rgba(255,255,255,.25);color:white" disabled>Connect revenue data first</button></div>
-      </div>
-    </div>
-  </section>`;
-  return `<section class="blue-panel">
-    <div class="hero-grid">
-      <div>
-        <span class="pill">G Google</span>
-        <h2>Almost there! Keep going! 🎯</h2>
-        <p>Just <strong>48 more reviews</strong> to reach <strong>5.0!</strong></p>
-        <div class="notice"><strong>Why this matters:</strong> Higher ratings help you show up first when people search on Google Maps and Google Search. More stars = more customers finding your business!</div>
-        <div class="notice"><strong>⚠ Let's Pick Up the Pace</strong><br>Your review collection has slowed down. Time to ask more customers!</div>
-        <div class="blue-stats">
-          <div class="blue-card"><small>LAST 30 DAYS</small><strong>18</strong>reviews<br><b style="color:#ffe25c">↓ 66% decrease</b></div>
-          <div class="blue-card"><small>PREVIOUS 30 DAYS</small><strong>53</strong>reviews</div>
+        <div class="notice revenue-box">
+          <small>POTENTIAL EXTRA REVENUE</small>
+          <strong>${potentialRevenue ? formatMoney(potentialRevenue) : "$--"}</strong>
+          <span>per month</span>
+          <p>${potentialRevenue ? `Based on ${formatMoney(revenuePerReview)} monthly value per review.` : "Add revenue_per_review_month in app_settings to calculate this."}</p>
         </div>
-        <div class="blue-card">
-          <small>YOUR FORECAST</small>
-          <h3>At your pace, you'll hit 5.0 ⭐ in 3 months.</h3>
-          <div class="progress"><span style="width:42%"></span></div>
+        <div class="blue-stats compact">
+          <div class="blue-card"><strong>+${visibilityBoost}%</strong><small>Visibility Boost</small></div>
+          <div class="blue-card"><strong>5.0</strong><small>Next Goal</small></div>
         </div>
-      </div>
-      <div class="blue-card" style="align-self:center;text-align:center;padding:44px">
-        <small>CURRENT RATING</small>
-        <div class="rating-big">4.9 ★</div>
-        <div class="stars" style="color:white">★★★★☆</div>
+        <button class="button ghost-button" type="button">Update Business Details</button>
         <hr style="border-color:rgba(255,255,255,.22)">
-        <div class="blue-stats"><div><strong>152</strong><small>TOTAL REVIEWS</small></div><div><strong>5.0</strong><small>NEXT GOAL</small></div></div>
-        <div class="notice">See Your Revenue Potential<br><button class="button" style="margin-top:12px;background:rgba(255,255,255,.25);color:white">+ Calculate My Revenue Impact</button></div>
+        <div class="milestone-card">
+          <strong>REVENUE IMPACT PER RATING MILESTONE</strong>
+          <div class="milestone-row"><span>${average} &#9733;</span><em>&rarr;</em><span>5.0 &#9733;</span><b>+${ratingDelta}</b><strong>${potentialRevenue ? `+${formatMoney(potentialRevenue)}` : "+$--"}</strong></div>
+          <p>Just ${reviewsNeeded} more 5-star reviews</p>
+        </div>
       </div>
     </div>
   </section>`;
@@ -457,6 +522,7 @@ function blueHero() {
 
 function googleInsights() {
   const perf = getPerformanceSummary();
+  const keywordSummary = getSearchKeywordSummary();
   return `<section class="section">
     <div class="section-title"><div class="soft-icon blue" style="width:34px;height:34px">G</div><div><h2>Google Business Profile Insights</h2><p>How customers find and interact with your business on Google</p></div></div>
     <div class="grid stat-grid">
@@ -478,8 +544,8 @@ function googleInsights() {
     <div class="card card-pad section">
       <h3>How People Search for You <span class="badge" style="float:right">${state.period}</span></h3>
       <p>Search terms people use to find your business on Google</p>
-      <div class="search-stats"><div class="search-stat"><strong>0</strong>SEARCH TERMS</div><div class="search-stat" style="background:#eef2ff;color:#4f46e5"><strong>0%</strong>BRAND SEARCHES</div><div class="search-stat" style="background:#e9fbf3;color:#12a66c"><strong>0%</strong>DISCOVERY SEARCHES</div></div>
-      <div class="empty-inline">Waiting for Google keyword impression rows.</div>
+      <div class="search-stats"><div class="search-stat"><strong>${formatNumber(keywordSummary.totalTerms)}</strong>SEARCH TERMS</div><div class="search-stat" style="background:#eef2ff;color:#4f46e5"><strong>${keywordSummary.brandPercent}%</strong>BRAND SEARCHES</div><div class="search-stat" style="background:#e9fbf3;color:#12a66c"><strong>${keywordSummary.discoveryPercent}%</strong>DISCOVERY SEARCHES</div></div>
+      ${keywordSummary.terms.length ? searchTable(keywordSummary.terms) : `<div class="empty-inline">Waiting for Google keyword impression rows.</div>`}
     </div>
   </section>`;
   return `<section class="section">
@@ -510,7 +576,7 @@ function googleInsights() {
 }
 
 function smallStat(label, value) {
-  return `<div class="card card-pad"><div class="soft-icon blue" style="width:38px;height:38px">◎</div><p style="margin-top:12px;font-weight:800">${label}</p><div class="value" style="font-size:30px">${value}</div><span class="positive">↑ +100%</span> <span class="muted">vs prior</span></div>`;
+  return `<div class="card card-pad"><div class="soft-icon blue" style="width:38px;height:38px">â—Ž</div><p style="margin-top:12px;font-weight:800">${label}</p><div class="value" style="font-size:30px">${value}</div><span class="positive">â†‘ +100%</span> <span class="muted">vs prior</span></div>`;
 }
 
 function donutCard(title, sub, bg, a, b) {
@@ -545,9 +611,8 @@ function barChart(type = "normal") {
   </svg>`;
 }
 
-function searchTable() {
-  const rows = ["airtime plumbing heating and air", "airtime", "ac repair murrieta", "ac repair near me", "airtime heating and air", "airtime hvac", "airtime plumbing heating & air", "airtime plumbing heating and air, innovation court, murrieta, ca", "hvac", "hvac contractor", "plumbing", "water heater"];
-  return `<table class="table"><thead><tr><th>#</th><th>Search Term</th><th>Impressions</th><th>Change</th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td>${i+1}</td><td>${r} ${i===2||i===7?'<span class="badge">BRAND</span>':''}</td><td>${i===0?'86':i===1?'40':'&lt; 15'}</td><td>${i===0?'<span class="negative">↓ -2.3%</span>':i===1?'<span class="positive">↑ +11.1%</span>':'—'}</td></tr>`).join("")}</tbody></table>`;
+function searchTable(rows) {
+  return `<table class="table"><thead><tr><th>#</th><th>Search Term</th><th>Type</th><th>Impressions</th></tr></thead><tbody>${rows.slice(0, 12).map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.term)}</td><td>${row.isBrand ? '<span class="badge">BRAND</span>' : '<span class="badge">DISCOVERY</span>'}</td><td>${formatNumber(row.impressions)}</td></tr>`).join("")}</tbody></table>`;
 }
 
 function reviewAnalyticsSections() {
@@ -602,9 +667,34 @@ function formatNumber(value) {
   return Number(value || 0).toLocaleString("en-US");
 }
 
+function formatMoney(value) {
+  return `$${Number(value || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+}
+
+function reviewsNeededForDisplayedRating(average, total) {
+  const count = Number(total || 0);
+  const currentAverage = Number(average || 0);
+  if (!count || currentAverage >= 4.95) return 0;
+  const currentPoints = currentAverage * count;
+  return Math.max(0, Math.ceil(((4.95 * count) - currentPoints) / 0.05));
+}
+
+function getNumericSetting(keys) {
+  const allowed = keys.map(key => key.toLowerCase());
+  const row = (liveData.appSettings || []).find(setting => {
+    const key = String(setting.key || setting.name || setting.setting || setting.setting_key || "").toLowerCase();
+    return allowed.includes(key);
+  });
+  const value = row?.value ?? row?.setting_value ?? row?.number_value ?? row?.amount;
+  return Number(value || 0) || 0;
+}
+
 function performanceTable() {
   const rows = getPerformanceRows().slice(0, 12);
-  return `<table class="table"><thead><tr><th>Date</th><th>Metric</th><th>Value</th></tr></thead><tbody>${rows.map(row => `<tr><td>${row.metric_date || row.date || ""}</td><td>${row.metric_name || row.metric || row.name || "Metric"}</td><td>${formatNumber(metricValue(row))}</td></tr>`).join("")}</tbody></table>`;
+  return `<table class="table"><thead><tr><th>Date</th><th>Metric</th><th>Value</th></tr></thead><tbody>${rows.map(row => {
+    const rawMetric = row.metric_name || row.metric || row.name || "Metric";
+    return `<tr><td>${row.metric_date || row.date || ""}</td><td>${metricLabel(rawMetric)}</td><td>${formatNumber(metricValue(row))}</td></tr>`;
+  }).join("")}</tbody></table>`;
 }
 
 function performanceTrendChart() {
@@ -683,12 +773,61 @@ function chartHoverAreas(dates, byMetric, series) {
 }
 
 function breakdownCard(title, sub, type) {
-  const rows = getPerformanceRows();
-  const hasData = rows.length > 0;
-  const bg = hasData ? "conic-gradient(#6366f1 0 50%, #18bf8f 50% 100%)" : "conic-gradient(#e7ebf2 0 100%)";
-  const a = type === "device" ? "Desktop" : "Google Search";
-  const b = type === "device" ? "Mobile" : "Google Maps";
-  return `<div class="card card-pad"><h3>${title}</h3><p>${sub}</p><div class="donut-wrap"><div class="donut" style="background:${bg}"><div class="donut-center">Total<strong>${formatNumber(rows.reduce((sum, row) => sum + metricValue(row), 0))}</strong></div></div><div class="legend"><span><i class="dot" style="background:#6366f1"></i>${a}</span><span><i class="dot" style="background:#18bf8f"></i>${b}</span></div>${hasData ? "" : `<div class="empty-inline">Waiting for breakdown metrics.</div>`}</div></div>`;
+  const segments = type === "device"
+    ? [
+        ["Desktop", "#6366f1", ["business_impressions_desktop_search", "business_impressions_desktop_maps", "desktop"]],
+        ["Mobile", "#f59e0b", ["business_impressions_mobile_search", "business_impressions_mobile_maps", "mobile"]]
+      ]
+    : [
+        ["Google Search", "#6366f1", ["business_impressions_desktop_search", "business_impressions_mobile_search", "search"]],
+        ["Google Maps", "#18bf8f", ["business_impressions_desktop_maps", "business_impressions_mobile_maps", "maps"]]
+      ];
+  const values = segments.map(([label, color, aliases]) => ({
+    label,
+    color,
+    value: sumPerformanceMetrics(aliases)
+  }));
+  const total = values.reduce((sum, item) => sum + item.value, 0);
+  const bg = total ? donutGradient(values, total) : "conic-gradient(#e7ebf2 0 100%)";
+  return `<div class="card card-pad"><h3>${title}</h3><p>${sub}</p><div class="donut-wrap"><div class="donut interactive-donut" style="background:${bg}" ${donutTooltipData(title, values, total)}><div class="donut-center">Total<strong>${formatNumber(total)}</strong></div></div><div class="legend donut-legend">${values.map(item => {
+    const percent = total ? Math.round((item.value / total) * 100) : 0;
+    return `<span><i class="dot" style="background:${item.color}"></i>${item.label} <b>${formatNumber(item.value)} (${percent}%)</b></span>`;
+  }).join("")}</div>${total ? "" : `<div class="empty-inline">Waiting for matching GBP breakdown metrics.</div>`}</div></div>`;
+}
+
+function donutTooltipData(title, values, total) {
+  const attrs = [
+    `data-donut-title="${escapeHtml(title)}"`,
+    `data-donut-total="${total}"`,
+    `data-donut-count="${values.length}"`
+  ];
+  values.forEach((item, index) => {
+    attrs.push(`data-donut-label${index}="${escapeHtml(item.label)}"`);
+    attrs.push(`data-donut-value${index}="${item.value}"`);
+    attrs.push(`data-donut-color${index}="${escapeHtml(item.color)}"`);
+  });
+  return attrs.join(" ");
+}
+
+function sumPerformanceMetrics(aliases) {
+  const allowed = aliases.map(alias => alias.toLowerCase());
+  return getPerformanceRows()
+    .filter(row => {
+      const metric = String(row.metric_name || row.metric || row.name || "").toLowerCase();
+      return allowed.some(alias => metric === alias || metric.includes(alias));
+    })
+    .reduce((sum, row) => sum + metricValue(row), 0);
+}
+
+function donutGradient(values, total) {
+  let start = 0;
+  const stops = values.map(item => {
+    const end = start + (item.value / total) * 100;
+    const stop = `${item.color} ${start.toFixed(2)}% ${end.toFixed(2)}%`;
+    start = end;
+    return stop;
+  });
+  return `conic-gradient(${stops.join(", ")})`;
 }
 
 function reviewsByMonth() {
@@ -799,7 +938,7 @@ function escapeHtml(value) {
 function recentReviews() {
   const activeReviews = getReviews();
   const body = activeReviews.length
-    ? `${activeReviews.map(r => reviewCard(r, true)).join("")}<button class="button" style="width:100%;margin-top:12px">⌄ Load More Reviews</button>`
+    ? `${activeReviews.map(r => reviewCard(r, true)).join("")}<button class="button" style="width:100%;margin-top:12px">âŒ„ Load More Reviews</button>`
     : `<div class="card card-pad empty-inline">No reviews found in Supabase yet.</div>`;
   return `<section class="section"><h2>Recent Reviews</h2>${body}</section>`;
 }
@@ -882,10 +1021,10 @@ function reviewsPage() {
     : `<div class="card card-pad empty-inline">No reviews found in Supabase yet.</div>`;
   return `<div class="page-head"><h1>Reviews</h1></div>
     ${dataNotice()}
-    <div class="filter-row"><input class="search" placeholder="Search reviews..."><strong>${summary.total} <span class="muted">reviews</span></strong><span style="flex:1"></span><button class="button">↧ Export (${summary.total})</button><button class="button primary">+ Add Reviews⌄</button></div>
+    <div class="filter-row"><input class="search" placeholder="Search reviews..."><strong>${summary.total} <span class="muted">reviews</span></strong><span style="flex:1"></span><button class="button">â†§ Export (${summary.total})</button><button class="button primary">+ Add ReviewsâŒ„</button></div>
     <div class="filter-row">${chips.map(x=>`<button class="chip">${x}</button>`).join("")}</div>
     <div class="reviews-layout">
-      <aside class="card filters"><strong>Filters</strong><label>Sources</label><div class="select-like">Nothing Selected⌄</div><label>Tags</label><div class="select-like">Nothing Selected⌄</div><label>Rating</label><div class="rating-filter">${[5,4,3,2,1].map(n=>`<button>★<br>${n}</button>`).join("")}</div><label>Time Period</label><div class="date-like">▣</div><label>Response Status</label><div class="dual-filter"><button>✓ Responded</button><button>☏ Pending</button></div><label>Visibility</label><div class="dual-filter"><button>◉ Visible</button><button>◌ Hidden</button></div><label>Review Content</label><div class="dual-filter"><button>With Text</button><button>Rating Only</button></div></aside>
+      <aside class="card filters"><strong>Filters</strong><label>Sources</label><div class="select-like">Nothing SelectedâŒ„</div><label>Tags</label><div class="select-like">Nothing SelectedâŒ„</div><label>Rating</label><div class="rating-filter">${[5,4,3,2,1].map(n=>`<button>â˜…<br>${n}</button>`).join("")}</div><label>Time Period</label><div class="date-like">â–£</div><label>Response Status</label><div class="dual-filter"><button>âœ“ Responded</button><button>â˜ Pending</button></div><label>Visibility</label><div class="dual-filter"><button>â—‰ Visible</button><button>â—Œ Hidden</button></div><label>Review Content</label><div class="dual-filter"><button>With Text</button><button>Rating Only</button></div></aside>
       <section>${reviewsBody}</section>
     </div>`;
 }
@@ -895,8 +1034,8 @@ function reviewCard(r, compact = false) {
   const emptyStars = "&#9734;".repeat(Math.max(0, 5 - Math.min(5, Number(r[3]))));
   const stars = filledStars + emptyStars;
   return `<article class="card review-card">
-    <div><div class="review-top"><div class="avatar">${r[6]}</div><div><h3>${r[0]} ${r[2] === "Private Feedback" ? '<span class="badge" style="color:#2f80ff">🔒 Private Feedback</span>' : ""}</h3><p>${r[1]} via ${r[2]}</p><div class="review-stars">${stars} <span class="muted">${r[3]}</span> 😊</div>${!compact ? `<p style="margin-top:14px;color:#465366">${r[4]}</p><div class="reply-box">${r[8] || `Thank you for the ${r[3]}-star review. We're glad we could help and appreciate you sharing your experience.`}</div>` : ""}<p style="margin-top:18px"><span class="dot" style="background:#22c55e"></span>Positive</p></div></div></div>
-    <div class="review-actions">${r[5] === "Respond" ? '<button class="button green">✧ Respond</button>' : '<span class="status-pill">✓ Replied</span>'}</div>
+    <div><div class="review-top"><div class="avatar">${r[6]}</div><div><h3>${r[0]} ${r[2] === "Private Feedback" ? '<span class="badge" style="color:#2f80ff">ðŸ”’ Private Feedback</span>' : ""}</h3><p>${r[1]} via ${r[2]}</p><div class="review-stars">${stars} <span class="muted">${r[3]}</span> ðŸ˜Š</div>${!compact ? `<p style="margin-top:14px;color:#465366">${r[4]}</p><div class="reply-box">${r[8] || `Thank you for the ${r[3]}-star review. We're glad we could help and appreciate you sharing your experience.`}</div>` : ""}<p style="margin-top:18px"><span class="dot" style="background:#22c55e"></span>Positive</p></div></div></div>
+    <div class="review-actions">${r[5] === "Respond" ? '<button class="button green">âœ§ Respond</button>' : '<span class="status-pill">âœ“ Replied</span>'}</div>
   </article>`;
 }
 
@@ -926,8 +1065,8 @@ function inviteesPage() {
   <div class="card card-pad"><p><strong>ESTIMATED CREDIT USAGE</strong></p><p>Email <span style="float:right">879 remaining after sends</span></p><div class="progress"><span style="width:3%;background:#3b82f6"></span></div><p style="margin-top:12px">SMS <span style="float:right">990 remaining after sends</span></p><div class="progress"><span style="width:1%;background:#22c55e"></span></div></div>
   <div class="kpi-row">${["304|Total","0|Waiting","248|Sent","10|Opened","42|Completed","6|Issues"].map(x=>{const [a,b]=x.split("|");return `<div class="card kpi"><strong>${a}</strong><p>${b}</p></div>`}).join("")}</div>
   <div class="actions-row"><button class="chip" style="background:var(--indigo);color:white">All</button><button class="chip">Waiting</button><button class="chip">Sent</button><button class="chip">Opened</button><button class="chip">Completed</button><button class="chip">Issues</button></div>
-  <div class="filter-row"><input class="search" placeholder="Search name, email, phone..."><strong>304 invitees</strong><span style="flex:1"></span><button class="button">↧ Export (304)</button><button class="button primary">+ Invite⌄</button></div>
-  <div class="card invite-table"><table class="table"><thead><tr><th>□</th><th>Customer (Invitee)</th><th>Status</th><th>Recent Activity</th></tr></thead><tbody>${names.map((n,i)=>`<tr><td>□</td><td><strong>${n}</strong><br><span class="muted">${n.split(" ")[0].toLowerCase()}@gmail.com<br>+1951${2000000+i*5311}</span></td><td><span class="badge">${i===0?"Not Sent":i===3?"Review Attempted":"Invite Sent"}</span></td><td>${i===0?"⚠ Not Sent 51 seconds ago":"💬 Invite Sent "+(i+1)*6+" minutes ago"} ›</td></tr>`).join("")}</tbody></table></div>`;
+  <div class="filter-row"><input class="search" placeholder="Search name, email, phone..."><strong>304 invitees</strong><span style="flex:1"></span><button class="button">â†§ Export (304)</button><button class="button primary">+ InviteâŒ„</button></div>
+  <div class="card invite-table"><table class="table"><thead><tr><th>â–¡</th><th>Customer (Invitee)</th><th>Status</th><th>Recent Activity</th></tr></thead><tbody>${names.map((n,i)=>`<tr><td>â–¡</td><td><strong>${n}</strong><br><span class="muted">${n.split(" ")[0].toLowerCase()}@gmail.com<br>+1951${2000000+i*5311}</span></td><td><span class="badge">${i===0?"Not Sent":i===3?"Review Attempted":"Invite Sent"}</span></td><td>${i===0?"âš  Not Sent 51 seconds ago":"ðŸ’¬ Invite Sent "+(i+1)*6+" minutes ago"} â€º</td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function requestReviewsPage() {
@@ -937,9 +1076,9 @@ function requestReviewsPage() {
   <div class="filter-row"><input class="search" placeholder="Search campaigns..." data-search-table="campaigns"><span style="flex:1"></span><button class="button dark" disabled>+ New Campaign</button></div>
   ${campaigns.length ? campaigns.map(campaignCard).join("") : `<div class="card card-pad empty-inline"><h2>No campaigns found in Supabase</h2><p>Sync GHL campaign/request-review records into a <strong>campaigns</strong> table to make this page live.</p></div>`}`;
   return `<div class="page-head"><h1>Request Reviews</h1></div><div class="filter-row"><input class="search" placeholder="Search campaigns..."><span style="flex:1"></span><button class="button dark">+ New Campaign</button></div>
-  <div class="card card-pad"><div style="display:flex;justify-content:space-between;gap:20px"><div><h3>Review Campaign</h3><span class="badge" style="background:#dcfce7;color:#16a34a">● Active</span> <span class="muted">Created 2 months ago</span></div><button class="button green">✎ Edit</button></div>
-  <div class="kpi-row">${["304|Sent","0|0% opened","98|32% clicked","49|Reviews","4|Opt-out","4.0 ★|Rating"].map(x=>{const [a,b]=x.split("|");return `<div class="card kpi"><strong>${a}</strong><p>${b}</p></div>`}).join("")}</div>
-  <div class="actions-row"><button class="button">▣ Opt-in Page</button><button class="button">▣ Copy</button><button class="button">◷ Schedule</button><button class="button primary">△ Send Now</button></div></div>`;
+  <div class="card card-pad"><div style="display:flex;justify-content:space-between;gap:20px"><div><h3>Review Campaign</h3><span class="badge" style="background:#dcfce7;color:#16a34a">â— Active</span> <span class="muted">Created 2 months ago</span></div><button class="button green">âœŽ Edit</button></div>
+  <div class="kpi-row">${["304|Sent","0|0% opened","98|32% clicked","49|Reviews","4|Opt-out","4.0 â˜…|Rating"].map(x=>{const [a,b]=x.split("|");return `<div class="card kpi"><strong>${a}</strong><p>${b}</p></div>`}).join("")}</div>
+  <div class="actions-row"><button class="button">â–£ Opt-in Page</button><button class="button">â–£ Copy</button><button class="button">â—· Schedule</button><button class="button primary">â–³ Send Now</button></div></div>`;
 }
 
 function feedbackFormsPage() {
@@ -949,7 +1088,7 @@ function feedbackFormsPage() {
   <div class="filter-row"><input class="search" placeholder="Search forms..." data-search-table="forms" style="width:360px"><span style="flex:1"></span><button class="button primary" disabled>+ Create Form</button></div>
   <div class="form-grid">${forms.length ? forms.map(formCard).join("") : `<div class="card card-pad empty-inline"><h2>No feedback forms found</h2><p>Create/sync rows in <strong>feedback_forms</strong> to show real forms here.</p></div>`}<div class="create-tile"><div><div class="soft-icon" style="margin:0 auto 16px">+</div><h3>Create Form</h3><p>Connect Supabase insert logic before enabling this.</p></div></div></div>`;
   return `<div class="page-head"><h1>Feedback Forms</h1></div><div class="filter-row"><input class="search" placeholder="Search forms..." style="width:360px"><span style="flex:1"></span><button class="button primary">+ Create Form</button></div>
-  <div class="form-grid"><div class="card"><div class="form-card-preview"><div class="mini-form"><strong>How would you rate us?</strong><p>Please take a moment to review your experience with us.</p><div class="stars" style="color:#b8bec8">★★★★★</div><small>Powered by Airtime Heating Cooling and Air</small></div></div><div class="card-pad"><h3>Default</h3><p>▣ 19 Mar 2026</p><div class="grid two-grid" style="margin-top:16px;gap:8px"><button class="button primary">✎ Edit</button><button class="button">&lt;/&gt; Install</button></div></div></div><div class="create-tile"><div><div class="soft-icon" style="margin:0 auto 16px">+</div><h3>Create Form</h3><p>Capture feedback from another channel.</p></div></div></div>`;
+  <div class="form-grid"><div class="card"><div class="form-card-preview"><div class="mini-form"><strong>How would you rate us?</strong><p>Please take a moment to review your experience with us.</p><div class="stars" style="color:#b8bec8">â˜…â˜…â˜…â˜…â˜…</div><small>Powered by Airtime Heating Cooling and Air</small></div></div><div class="card-pad"><h3>Default</h3><p>â–£ 19 Mar 2026</p><div class="grid two-grid" style="margin-top:16px;gap:8px"><button class="button primary">âœŽ Edit</button><button class="button">&lt;/&gt; Install</button></div></div></div><div class="create-tile"><div><div class="soft-icon" style="margin:0 auto 16px">+</div><h3>Create Form</h3><p>Capture feedback from another channel.</p></div></div></div>`;
 }
 
 function qrCodesPage() {
@@ -957,11 +1096,11 @@ function qrCodesPage() {
   return `<div class="page-head"><h1>QR Codes</h1></div>
   ${dataNotice()}
   ${qrCodes.length ? `<div class="grid stat-grid">${qrCodes.map(qrCard).join("")}</div>` : `<div class="empty-state" style="min-height:620px"><div style="width:100%;max-width:850px"><div class="soft-icon blue" style="margin:0 auto 24px;width:58px;height:58px">${icons.qr}</div><h2>No QR Codes in Supabase Yet</h2><p>Sync or create rows in a <strong>qr_codes</strong> table to show real QR code records, scan counts, and conversion data here.</p><button class="button primary" style="margin-top:28px" disabled>Create QR Code after backend is connected</button></div></div>`}`;
-  return `<div class="page-head"><h1>QR Codes</h1></div><div class="empty-state" style="min-height:760px"><div style="width:100%;max-width:1350px"><div class="soft-icon blue" style="margin:0 auto 24px;width:58px;height:58px">${icons.qr}</div><h2>Start Collecting Reviews with QR Codes</h2><p>QR codes make it super easy for customers to leave reviews. Simply scan and go - no<br>typing required!</p><div class="feature-row">${feature("Lightning Fast","Customers scan and review in seconds. No typing, no hassle - just point and shoot!","green")}${feature("Prevent Negative Reviews","Direct unhappy customers to private feedback forms instead of public review sites.","blue")}${feature("Track Performance","See exactly how many scans each QR code gets and which ones drive the most reviews.","purple")}</div><div class="card card-pad"><h2 style="text-align:left">Perfect for:</h2><div class="perfect section"><div>🍽<br><strong>Restaurants</strong></div><div>🏢<br><strong>Retail Stores</strong></div><div>📄<br><strong>Service Businesses</strong></div><div>💼<br><strong>Hotels</strong></div></div></div><button class="button primary" style="margin-top:48px;height:56px;font-size:18px">▦ Create Your First QR Code</button><p style="margin-top:14px">Get started in less than 2 minutes</p></div></div>`;
+  return `<div class="page-head"><h1>QR Codes</h1></div><div class="empty-state" style="min-height:760px"><div style="width:100%;max-width:1350px"><div class="soft-icon blue" style="margin:0 auto 24px;width:58px;height:58px">${icons.qr}</div><h2>Start Collecting Reviews with QR Codes</h2><p>QR codes make it super easy for customers to leave reviews. Simply scan and go - no<br>typing required!</p><div class="feature-row">${feature("Lightning Fast","Customers scan and review in seconds. No typing, no hassle - just point and shoot!","green")}${feature("Prevent Negative Reviews","Direct unhappy customers to private feedback forms instead of public review sites.","blue")}${feature("Track Performance","See exactly how many scans each QR code gets and which ones drive the most reviews.","purple")}</div><div class="card card-pad"><h2 style="text-align:left">Perfect for:</h2><div class="perfect section"><div>ðŸ½<br><strong>Restaurants</strong></div><div>ðŸ¢<br><strong>Retail Stores</strong></div><div>ðŸ“„<br><strong>Service Businesses</strong></div><div>ðŸ’¼<br><strong>Hotels</strong></div></div></div><button class="button primary" style="margin-top:48px;height:56px;font-size:18px">â–¦ Create Your First QR Code</button><p style="margin-top:14px">Get started in less than 2 minutes</p></div></div>`;
 }
 
 function feature(title, text, color) {
-  return `<div class="card card-pad" style="text-align:left"><div class="soft-icon ${color}" style="width:38px;height:38px">✦</div><h3 style="margin-top:14px">${title}</h3><p style="margin-top:18px">${text}</p></div>`;
+  return `<div class="card card-pad" style="text-align:left"><div class="soft-icon ${color}" style="width:38px;height:38px">âœ¦</div><h3 style="margin-top:14px">${title}</h3><p style="margin-top:18px">${text}</p></div>`;
 }
 
 function autoRespondPage() {
@@ -1026,12 +1165,10 @@ function bindPageEvents() {
     render();
   }));
   bindPerformanceTooltips();
+  bindDonutTooltips();
 }
 
-function bindPerformanceTooltips() {
-  const zones = document.querySelectorAll(".chart-hover-zone");
-  if (!zones.length) return;
-
+function getChartTooltip() {
   let tooltip = document.getElementById("chartTooltip");
   if (!tooltip) {
     tooltip = document.createElement("div");
@@ -1039,6 +1176,24 @@ function bindPerformanceTooltips() {
     tooltip.className = "chart-tooltip";
     document.body.appendChild(tooltip);
   }
+  return tooltip;
+}
+
+function positionTooltip(tooltip, event) {
+  const offset = 16;
+  const rect = tooltip.getBoundingClientRect();
+  const left = Math.min(window.innerWidth - rect.width - 12, event.clientX + offset);
+  const top = Math.max(12, event.clientY - rect.height - offset);
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${top}px`;
+  tooltip.classList.add("show");
+}
+
+function bindPerformanceTooltips() {
+  const zones = document.querySelectorAll(".chart-hover-zone");
+  if (!zones.length) return;
+
+  const tooltip = getChartTooltip();
 
   const rows = [
     ["Impressions", "impressions", "#6b6cf6"],
@@ -1054,19 +1209,41 @@ function bindPerformanceTooltips() {
       return `<span><i style="background:${color}"></i>${label}<b>${value}</b></span>`;
     }).join("")}`;
 
-    const offset = 16;
-    const rect = tooltip.getBoundingClientRect();
-    const left = Math.min(window.innerWidth - rect.width - 12, event.clientX + offset);
-    const top = Math.max(12, event.clientY - rect.height - offset);
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${top}px`;
-    tooltip.classList.add("show");
+    positionTooltip(tooltip, event);
   };
 
   zones.forEach(zone => {
     zone.addEventListener("mousemove", event => updateTooltip(event, zone));
     zone.addEventListener("mouseenter", event => updateTooltip(event, zone));
     zone.addEventListener("mouseleave", () => tooltip.classList.remove("show"));
+  });
+}
+
+function bindDonutTooltips() {
+  const donuts = document.querySelectorAll(".interactive-donut");
+  if (!donuts.length) return;
+
+  const tooltip = getChartTooltip();
+
+  const updateTooltip = (event, donut) => {
+    const count = Number(donut.dataset.donutCount || 0);
+    const total = Number(donut.dataset.donutTotal || 0);
+    const rows = Array.from({ length: count }, (_, index) => {
+      const label = donut.dataset[`donutLabel${index}`] || "Segment";
+      const value = Number(donut.dataset[`donutValue${index}`] || 0);
+      const color = donut.dataset[`donutColor${index}`] || "#6366f1";
+      const percent = total ? Math.round((value / total) * 100) : 0;
+      return `<span><i style="background:${color}"></i>${escapeHtml(label)}<b>${formatNumber(value)} (${percent}%)</b></span>`;
+    }).join("");
+
+    tooltip.innerHTML = `<strong>${escapeHtml(donut.dataset.donutTitle || "Breakdown")} · Total ${formatNumber(total)}</strong>${rows}`;
+    positionTooltip(tooltip, event);
+  };
+
+  donuts.forEach(donut => {
+    donut.addEventListener("mousemove", event => updateTooltip(event, donut));
+    donut.addEventListener("mouseenter", event => updateTooltip(event, donut));
+    donut.addEventListener("mouseleave", () => tooltip.classList.remove("show"));
   });
 }
 
