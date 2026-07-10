@@ -59,6 +59,7 @@ const liveData = {
   socialProof: null,
   appSettings: null,
   searchKeywords: null,
+  reviewRequestsSent: null,
   helpArticles: null
 };
 
@@ -93,7 +94,7 @@ function render() {
 async function loadLiveData() {
   try {
     supabaseConfig = await loadRuntimeConfig();
-    const [reviewRows, metricRows, performanceRows, invitees, campaigns, forms, qrCodes, locations, connections, autoResponses, socialProof, appSettings, searchKeywords, helpArticles] = await Promise.all([
+    const [reviewRows, metricRows, performanceRows, invitees, campaigns, forms, qrCodes, locations, connections, autoResponses, socialProof, appSettings, searchKeywords, reviewRequestsSent, helpArticles] = await Promise.all([
       supabaseRest("reviews?select=*&order=review_time.desc"),
       supabaseRest("dashboard_metrics?select=*&limit=1"),
       supabaseRest("gbp_daily_metrics?select=*&order=metric_date.desc"),
@@ -107,6 +108,7 @@ async function loadLiveData() {
       safeSupabaseRest("social_proof_widgets?select=*&order=created_at.desc"),
       safeSupabaseRest("app_settings?select=*"),
       safeSupabaseRest("gbp_search_keywords?select=*&order=month.desc&order=impressions.desc"),
+      safeSupabaseRest("review_requests_sent?select=*&order=sent_at.desc"),
       safeSupabaseRest("help_articles?select=*&order=created_at.desc")
     ]);
     liveData.reviews = reviewRows.map(mapReviewRow);
@@ -122,6 +124,7 @@ async function loadLiveData() {
     liveData.socialProof = socialProof || [];
     liveData.appSettings = appSettings || [];
     liveData.searchKeywords = searchKeywords || [];
+    liveData.reviewRequestsSent = reviewRequestsSent || [];
     liveData.helpArticles = helpArticles || [];
     liveData.loaded = true;
     liveData.error = null;
@@ -201,15 +204,24 @@ function getSummary() {
   const ratings = activeReviews.map(r => Number(r[3] || 0)).filter(Boolean);
   const replied = activeReviews.filter(r => r[5] === "Replied" || r[7] === "replied").length;
   const useStoredMetrics = state.period === "All Time" && liveData.metrics;
+  const requestRows = getReviewRequestRows();
+  const requestCount = requestRows.length;
+  const inviteConversion = requestCount ? Math.round((activeReviews.length / requestCount) * 1000) / 10 : 0;
   return {
     total: useStoredMetrics ? liveData.metrics.total_reviews : activeReviews.length,
     average: Number(useStoredMetrics ? liveData.metrics.average_rating : (ratings.length ? ratings.reduce((sum, rating) => sum + rating, 0) / ratings.length : 0)),
     responseRate: Number(useStoredMetrics ? liveData.metrics.response_rate : (activeReviews.length ? Math.round((replied / activeReviews.length) * 1000) / 10 : 0)),
-    inviteConversion: Number(useStoredMetrics ? (liveData.metrics.invite_conversion ?? 0) : 0),
+    inviteConversion,
+    reviewRequestsSent: requestCount,
     avgResponseTime: useStoredMetrics ? (liveData.metrics.avg_response_time || "-") : "-",
     bad: activeReviews.filter(r => Number(r[3]) <= 3).length,
     needsResponse: activeReviews.filter(r => r[5] === "Respond" || r[7] === "needs_response").length
   };
+}
+
+function getReviewRequestRows() {
+  const rows = liveData.reviewRequestsSent || [];
+  return filterByPeriod(rows, row => row.sent_at || row.created_at);
 }
 
 function getPeriodStart(period) {
@@ -576,7 +588,7 @@ function googleInsights() {
 }
 
 function smallStat(label, value) {
-  return `<div class="card card-pad"><div class="soft-icon blue" style="width:38px;height:38px">â—Ž</div><p style="margin-top:12px;font-weight:800">${label}</p><div class="value" style="font-size:30px">${value}</div><span class="positive">â†‘ +100%</span> <span class="muted">vs prior</span></div>`;
+  return `<div class="card card-pad"><div class="soft-icon blue" style="width:38px;height:38px">&#9678;</div><p style="margin-top:12px;font-weight:800">${label}</p><div class="value" style="font-size:30px">${value}</div><span class="positive">&uarr; +100%</span> <span class="muted">vs prior</span></div>`;
 }
 
 function donutCard(title, sub, bg, a, b) {
@@ -938,7 +950,7 @@ function escapeHtml(value) {
 function recentReviews() {
   const activeReviews = getReviews();
   const body = activeReviews.length
-    ? `${activeReviews.map(r => reviewCard(r, true)).join("")}<button class="button" style="width:100%;margin-top:12px">âŒ„ Load More Reviews</button>`
+    ? `${activeReviews.map(r => reviewCard(r, true)).join("")}<button class="button" style="width:100%;margin-top:12px">Load More Reviews</button>`
     : `<div class="card card-pad empty-inline">No reviews found in Supabase yet.</div>`;
   return `<section class="section"><h2>Recent Reviews</h2>${body}</section>`;
 }
@@ -947,17 +959,17 @@ function analyticsTab() {
   const summary = getSummary();
   const campaigns = liveData.campaigns || [];
   const invitees = liveData.invitees || [];
-  const sent = countMatching(invitees, ["sent", "invite_sent", "opened", "completed"]);
+  const sent = summary.reviewRequestsSent || countMatching(invitees, ["sent", "invite_sent", "opened", "completed"]);
   const opened = countMatching(invitees, ["opened", "completed"]);
   const completed = countMatching(invitees, ["completed", "review_attempted"]);
-  const successRate = sent ? Math.round((completed / sent) * 1000) / 10 : 0;
+  const successRate = summary.inviteConversion || (sent ? Math.round((completed / sent) * 1000) / 10 : 0);
   return `${head("Good Evening!", "See how your review requests are performing and get more reviews.", "analytics")}
   ${dataNotice()}
   <div class="card card-pad"><h2>How Are We Doing? <span class="badge">${state.period}</span></h2><div class="grid stat-grid section">
-    ${metric("Review Requests Sent", String(sent), "From invitees", "blue", "share")}
-    ${metric("Clicks to Review Sites", String(completed), "Needs GHL click events", "green", "trend")}
-    ${metric("Success Rate", `${successRate}%`, "From completed invites", "purple", "trend")}
-    ${metric("Private Messages", "0", "Needs GHL conversations", "blue", "chat")}
+    ${metric("Review Requests Sent", String(sent), "", "blue", "share")}
+    ${metric("Reviews Received", String(summary.total), "", "green", "chat")}
+    ${metric("Request Conversion", `${successRate}%`, "", "purple", "trend")}
+    ${metric("Opened", String(opened), "", "blue", "trend")}
   </div></div>
   <div class="card card-pad section"><h2>What's Working Best? <span class="badge">${state.period}</span></h2><div class="grid stat-grid section">
     ${channel("Email Campaigns", countChannel(invitees, "email"))}
@@ -1021,10 +1033,10 @@ function reviewsPage() {
     : `<div class="card card-pad empty-inline">No reviews found in Supabase yet.</div>`;
   return `<div class="page-head"><h1>Reviews</h1></div>
     ${dataNotice()}
-    <div class="filter-row"><input class="search" placeholder="Search reviews..."><strong>${summary.total} <span class="muted">reviews</span></strong><span style="flex:1"></span><button class="button">â†§ Export (${summary.total})</button><button class="button primary">+ Add ReviewsâŒ„</button></div>
+    <div class="filter-row"><input class="search" placeholder="Search reviews..."><strong>${summary.total} <span class="muted">reviews</span></strong><span style="flex:1"></span><button class="button">Export (${summary.total})</button><button class="button primary">+ Add Reviews</button></div>
     <div class="filter-row">${chips.map(x=>`<button class="chip">${x}</button>`).join("")}</div>
     <div class="reviews-layout">
-      <aside class="card filters"><strong>Filters</strong><label>Sources</label><div class="select-like">Nothing SelectedâŒ„</div><label>Tags</label><div class="select-like">Nothing SelectedâŒ„</div><label>Rating</label><div class="rating-filter">${[5,4,3,2,1].map(n=>`<button>â˜…<br>${n}</button>`).join("")}</div><label>Time Period</label><div class="date-like">â–£</div><label>Response Status</label><div class="dual-filter"><button>âœ“ Responded</button><button>â˜ Pending</button></div><label>Visibility</label><div class="dual-filter"><button>â—‰ Visible</button><button>â—Œ Hidden</button></div><label>Review Content</label><div class="dual-filter"><button>With Text</button><button>Rating Only</button></div></aside>
+      <aside class="card filters"><strong>Filters</strong><label>Sources</label><div class="select-like">Nothing Selected</div><label>Tags</label><div class="select-like">Nothing Selected</div><label>Rating</label><div class="rating-filter">${[5,4,3,2,1].map(n=>`<button>&#9733;<br>${n}</button>`).join("")}</div><label>Time Period</label><div class="date-like">Date</div><label>Response Status</label><div class="dual-filter"><button>&#10003; Responded</button><button>Pending</button></div><label>Visibility</label><div class="dual-filter"><button>Visible</button><button>Hidden</button></div><label>Review Content</label><div class="dual-filter"><button>With Text</button><button>Rating Only</button></div></aside>
       <section>${reviewsBody}</section>
     </div>`;
 }
@@ -1033,9 +1045,13 @@ function reviewCard(r, compact = false) {
   const filledStars = "&#9733;".repeat(Math.max(0, Math.min(5, Number(r[3]))));
   const emptyStars = "&#9734;".repeat(Math.max(0, 5 - Math.min(5, Number(r[3]))));
   const stars = filledStars + emptyStars;
+  const privateBadge = r[2] === "Private Feedback" ? '<span class="badge" style="color:#2f80ff">&#128274; Private Feedback</span>' : "";
+  const actionHtml = r[5] === "Respond"
+    ? '<button class="button green">Respond</button>'
+    : '<span class="status-pill">&#10003; Replied</span>';
   return `<article class="card review-card">
-    <div><div class="review-top"><div class="avatar">${r[6]}</div><div><h3>${r[0]} ${r[2] === "Private Feedback" ? '<span class="badge" style="color:#2f80ff">ðŸ”’ Private Feedback</span>' : ""}</h3><p>${r[1]} via ${r[2]}</p><div class="review-stars">${stars} <span class="muted">${r[3]}</span> ðŸ˜Š</div>${!compact ? `<p style="margin-top:14px;color:#465366">${r[4]}</p><div class="reply-box">${r[8] || `Thank you for the ${r[3]}-star review. We're glad we could help and appreciate you sharing your experience.`}</div>` : ""}<p style="margin-top:18px"><span class="dot" style="background:#22c55e"></span>Positive</p></div></div></div>
-    <div class="review-actions">${r[5] === "Respond" ? '<button class="button green">âœ§ Respond</button>' : '<span class="status-pill">âœ“ Replied</span>'}</div>
+    <div><div class="review-top"><div class="avatar">${r[6]}</div><div><h3>${r[0]} ${privateBadge}</h3><p>${r[1]} via ${r[2]}</p><div class="review-stars">${stars} <span class="muted">${r[3]}</span></div>${!compact ? `<p style="margin-top:14px;color:#465366">${r[4]}</p><div class="reply-box">${r[8] || `Thank you for the ${r[3]}-star review. We're glad we could help and appreciate you sharing your experience.`}</div>` : ""}<p style="margin-top:18px"><span class="dot" style="background:#22c55e"></span>Positive</p></div></div></div>
+    <div class="review-actions">${actionHtml}</div>
   </article>`;
 }
 
@@ -1065,8 +1081,8 @@ function inviteesPage() {
   <div class="card card-pad"><p><strong>ESTIMATED CREDIT USAGE</strong></p><p>Email <span style="float:right">879 remaining after sends</span></p><div class="progress"><span style="width:3%;background:#3b82f6"></span></div><p style="margin-top:12px">SMS <span style="float:right">990 remaining after sends</span></p><div class="progress"><span style="width:1%;background:#22c55e"></span></div></div>
   <div class="kpi-row">${["304|Total","0|Waiting","248|Sent","10|Opened","42|Completed","6|Issues"].map(x=>{const [a,b]=x.split("|");return `<div class="card kpi"><strong>${a}</strong><p>${b}</p></div>`}).join("")}</div>
   <div class="actions-row"><button class="chip" style="background:var(--indigo);color:white">All</button><button class="chip">Waiting</button><button class="chip">Sent</button><button class="chip">Opened</button><button class="chip">Completed</button><button class="chip">Issues</button></div>
-  <div class="filter-row"><input class="search" placeholder="Search name, email, phone..."><strong>304 invitees</strong><span style="flex:1"></span><button class="button">â†§ Export (304)</button><button class="button primary">+ InviteâŒ„</button></div>
-  <div class="card invite-table"><table class="table"><thead><tr><th>â–¡</th><th>Customer (Invitee)</th><th>Status</th><th>Recent Activity</th></tr></thead><tbody>${names.map((n,i)=>`<tr><td>â–¡</td><td><strong>${n}</strong><br><span class="muted">${n.split(" ")[0].toLowerCase()}@gmail.com<br>+1951${2000000+i*5311}</span></td><td><span class="badge">${i===0?"Not Sent":i===3?"Review Attempted":"Invite Sent"}</span></td><td>${i===0?"âš  Not Sent 51 seconds ago":"ðŸ’¬ Invite Sent "+(i+1)*6+" minutes ago"} â€º</td></tr>`).join("")}</tbody></table></div>`;
+  <div class="filter-row"><input class="search" placeholder="Search name, email, phone..."><strong>304 invitees</strong><span style="flex:1"></span><button class="button">Export (304)</button><button class="button primary">+ Invite</button></div>
+  <div class="card invite-table"><table class="table"><thead><tr><th></th><th>Customer (Invitee)</th><th>Status</th><th>Recent Activity</th></tr></thead><tbody>${names.map((n,i)=>`<tr><td></td><td><strong>${n}</strong><br><span class="muted">${n.split(" ")[0].toLowerCase()}@gmail.com<br>+1951${2000000+i*5311}</span></td><td><span class="badge">${i===0?"Not Sent":i===3?"Review Attempted":"Invite Sent"}</span></td><td>${i===0?"Not Sent 51 seconds ago":"Invite Sent "+(i+1)*6+" minutes ago"}</td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function requestReviewsPage() {
@@ -1076,9 +1092,9 @@ function requestReviewsPage() {
   <div class="filter-row"><input class="search" placeholder="Search campaigns..." data-search-table="campaigns"><span style="flex:1"></span><button class="button dark" disabled>+ New Campaign</button></div>
   ${campaigns.length ? campaigns.map(campaignCard).join("") : `<div class="card card-pad empty-inline"><h2>No campaigns found in Supabase</h2><p>Sync GHL campaign/request-review records into a <strong>campaigns</strong> table to make this page live.</p></div>`}`;
   return `<div class="page-head"><h1>Request Reviews</h1></div><div class="filter-row"><input class="search" placeholder="Search campaigns..."><span style="flex:1"></span><button class="button dark">+ New Campaign</button></div>
-  <div class="card card-pad"><div style="display:flex;justify-content:space-between;gap:20px"><div><h3>Review Campaign</h3><span class="badge" style="background:#dcfce7;color:#16a34a">â— Active</span> <span class="muted">Created 2 months ago</span></div><button class="button green">âœŽ Edit</button></div>
-  <div class="kpi-row">${["304|Sent","0|0% opened","98|32% clicked","49|Reviews","4|Opt-out","4.0 â˜…|Rating"].map(x=>{const [a,b]=x.split("|");return `<div class="card kpi"><strong>${a}</strong><p>${b}</p></div>`}).join("")}</div>
-  <div class="actions-row"><button class="button">â–£ Opt-in Page</button><button class="button">â–£ Copy</button><button class="button">â—· Schedule</button><button class="button primary">â–³ Send Now</button></div></div>`;
+  <div class="card card-pad"><div style="display:flex;justify-content:space-between;gap:20px"><div><h3>Review Campaign</h3><span class="badge" style="background:#dcfce7;color:#16a34a">Active</span> <span class="muted">Created 2 months ago</span></div><button class="button green">Edit</button></div>
+  <div class="kpi-row">${["304|Sent","0|0% opened","98|32% clicked","49|Reviews","4|Opt-out","4.0 &#9733;|Rating"].map(x=>{const [a,b]=x.split("|");return `<div class="card kpi"><strong>${a}</strong><p>${b}</p></div>`}).join("")}</div>
+  <div class="actions-row"><button class="button">Opt-in Page</button><button class="button">Copy</button><button class="button">Schedule</button><button class="button primary">Send Now</button></div></div>`;
 }
 
 function feedbackFormsPage() {
@@ -1088,7 +1104,7 @@ function feedbackFormsPage() {
   <div class="filter-row"><input class="search" placeholder="Search forms..." data-search-table="forms" style="width:360px"><span style="flex:1"></span><button class="button primary" disabled>+ Create Form</button></div>
   <div class="form-grid">${forms.length ? forms.map(formCard).join("") : `<div class="card card-pad empty-inline"><h2>No feedback forms found</h2><p>Create/sync rows in <strong>feedback_forms</strong> to show real forms here.</p></div>`}<div class="create-tile"><div><div class="soft-icon" style="margin:0 auto 16px">+</div><h3>Create Form</h3><p>Connect Supabase insert logic before enabling this.</p></div></div></div>`;
   return `<div class="page-head"><h1>Feedback Forms</h1></div><div class="filter-row"><input class="search" placeholder="Search forms..." style="width:360px"><span style="flex:1"></span><button class="button primary">+ Create Form</button></div>
-  <div class="form-grid"><div class="card"><div class="form-card-preview"><div class="mini-form"><strong>How would you rate us?</strong><p>Please take a moment to review your experience with us.</p><div class="stars" style="color:#b8bec8">â˜…â˜…â˜…â˜…â˜…</div><small>Powered by Airtime Heating Cooling and Air</small></div></div><div class="card-pad"><h3>Default</h3><p>â–£ 19 Mar 2026</p><div class="grid two-grid" style="margin-top:16px;gap:8px"><button class="button primary">âœŽ Edit</button><button class="button">&lt;/&gt; Install</button></div></div></div><div class="create-tile"><div><div class="soft-icon" style="margin:0 auto 16px">+</div><h3>Create Form</h3><p>Capture feedback from another channel.</p></div></div></div>`;
+  <div class="form-grid"><div class="card"><div class="form-card-preview"><div class="mini-form"><strong>How would you rate us?</strong><p>Please take a moment to review your experience with us.</p><div class="stars" style="color:#b8bec8">&#9733;&#9733;&#9733;&#9733;&#9733;</div><small>Powered by Airtime Heating Cooling and Air</small></div></div><div class="card-pad"><h3>Default</h3><p>19 Mar 2026</p><div class="grid two-grid" style="margin-top:16px;gap:8px"><button class="button primary">Edit</button><button class="button">&lt;/&gt; Install</button></div></div></div><div class="create-tile"><div><div class="soft-icon" style="margin:0 auto 16px">+</div><h3>Create Form</h3><p>Capture feedback from another channel.</p></div></div></div>`;
 }
 
 function qrCodesPage() {
@@ -1096,11 +1112,11 @@ function qrCodesPage() {
   return `<div class="page-head"><h1>QR Codes</h1></div>
   ${dataNotice()}
   ${qrCodes.length ? `<div class="grid stat-grid">${qrCodes.map(qrCard).join("")}</div>` : `<div class="empty-state" style="min-height:620px"><div style="width:100%;max-width:850px"><div class="soft-icon blue" style="margin:0 auto 24px;width:58px;height:58px">${icons.qr}</div><h2>No QR Codes in Supabase Yet</h2><p>Sync or create rows in a <strong>qr_codes</strong> table to show real QR code records, scan counts, and conversion data here.</p><button class="button primary" style="margin-top:28px" disabled>Create QR Code after backend is connected</button></div></div>`}`;
-  return `<div class="page-head"><h1>QR Codes</h1></div><div class="empty-state" style="min-height:760px"><div style="width:100%;max-width:1350px"><div class="soft-icon blue" style="margin:0 auto 24px;width:58px;height:58px">${icons.qr}</div><h2>Start Collecting Reviews with QR Codes</h2><p>QR codes make it super easy for customers to leave reviews. Simply scan and go - no<br>typing required!</p><div class="feature-row">${feature("Lightning Fast","Customers scan and review in seconds. No typing, no hassle - just point and shoot!","green")}${feature("Prevent Negative Reviews","Direct unhappy customers to private feedback forms instead of public review sites.","blue")}${feature("Track Performance","See exactly how many scans each QR code gets and which ones drive the most reviews.","purple")}</div><div class="card card-pad"><h2 style="text-align:left">Perfect for:</h2><div class="perfect section"><div>ðŸ½<br><strong>Restaurants</strong></div><div>ðŸ¢<br><strong>Retail Stores</strong></div><div>ðŸ“„<br><strong>Service Businesses</strong></div><div>ðŸ’¼<br><strong>Hotels</strong></div></div></div><button class="button primary" style="margin-top:48px;height:56px;font-size:18px">â–¦ Create Your First QR Code</button><p style="margin-top:14px">Get started in less than 2 minutes</p></div></div>`;
+  return `<div class="page-head"><h1>QR Codes</h1></div><div class="empty-state" style="min-height:760px"><div style="width:100%;max-width:1350px"><div class="soft-icon blue" style="margin:0 auto 24px;width:58px;height:58px">${icons.qr}</div><h2>Start Collecting Reviews with QR Codes</h2><p>QR codes make it super easy for customers to leave reviews. Simply scan and go - no<br>typing required!</p><div class="feature-row">${feature("Lightning Fast","Customers scan and review in seconds. No typing, no hassle - just point and shoot!","green")}${feature("Prevent Negative Reviews","Direct unhappy customers to private feedback forms instead of public review sites.","blue")}${feature("Track Performance","See exactly how many scans each QR code gets and which ones drive the most reviews.","purple")}</div><div class="card card-pad"><h2 style="text-align:left">Perfect for:</h2><div class="perfect section"><div><strong>Restaurants</strong></div><div><strong>Retail Stores</strong></div><div><strong>Service Businesses</strong></div><div><strong>Hotels</strong></div></div></div><button class="button primary" style="margin-top:48px;height:56px;font-size:18px">Create Your First QR Code</button><p style="margin-top:14px">Get started in less than 2 minutes</p></div></div>`;
 }
 
 function feature(title, text, color) {
-  return `<div class="card card-pad" style="text-align:left"><div class="soft-icon ${color}" style="width:38px;height:38px">âœ¦</div><h3 style="margin-top:14px">${title}</h3><p style="margin-top:18px">${text}</p></div>`;
+  return `<div class="card card-pad" style="text-align:left"><div class="soft-icon ${color}" style="width:38px;height:38px">+</div><h3 style="margin-top:14px">${title}</h3><p style="margin-top:18px">${text}</p></div>`;
 }
 
 function autoRespondPage() {
