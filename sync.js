@@ -18,6 +18,14 @@ const DAILY_METRICS = [
   "BUSINESS_DIRECTION_REQUESTS"
 ];
 
+const BRAND_TERMS = [
+  "airtime",
+  "airtime plumbing",
+  "airtime heating",
+  "airtime heating and air",
+  "airtime plumbing heating and air"
+];
+
 module.exports = async function handler(req, res) {
   try {
     const connections = await supabase("google_connections?select=*&limit=1");
@@ -30,11 +38,18 @@ module.exports = async function handler(req, res) {
 
     let reviewCount = 0;
     let metricCount = 0;
+    let keywordCount = 0;
+    let skippedLocations = 0;
 
     for (const location of gbpLocations) {
       const googleLocationId = location.google_location_id || cleanGoogleLocationId(location.name);
       const googleAccountId = location.google_account_id || connection.google_account_id;
       const internalLocationId = location.location_id || connection.location_id || null;
+
+      if (!googleLocationId || !googleAccountId) {
+        skippedLocations += 1;
+        continue;
+      }
 
       const reviewResult = await syncReviews({
         accessToken,
@@ -50,11 +65,18 @@ module.exports = async function handler(req, res) {
         internalLocationId
       });
       metricCount += metricResult;
+
+      const keywordResult = await syncSearchKeywords({
+        accessToken,
+        googleLocationId,
+        internalLocationId
+      });
+      keywordCount += keywordResult;
     }
 
     await rebuildDashboardMetrics();
 
-    res.status(200).json({ ok: true, reviewCount, metricCount });
+    res.status(200).json({ ok: true, reviewCount, metricCount, keywordCount, skippedLocations });
   } catch (error) {
     sendError(res, error);
   }
@@ -149,6 +171,101 @@ async function syncPerformance({ accessToken, googleLocationId, internalLocation
   });
 
   return rows.length;
+}
+
+async function syncSearchKeywords({ accessToken, googleLocationId, internalLocationId }) {
+  if (!internalLocationId) return 0;
+
+  const rows = [];
+  for (const monthDate of getKeywordMonths()) {
+    const month = googleMonthToIso({
+      year: monthDate.getUTCFullYear(),
+      month: monthDate.getUTCMonth() + 1
+    });
+    const keywordItems = await fetchKeywordMonth({ accessToken, googleLocationId, monthDate });
+    for (const item of keywordItems) {
+      const searchTerm = item.searchKeyword || "";
+      const impressions = parseInsightsValue(item.insightsValue);
+      if (!searchTerm || !month || !impressions) continue;
+      rows.push({
+        location_id: internalLocationId,
+        month,
+        search_term: searchTerm,
+        impressions,
+        is_brand: isBrandSearch(searchTerm),
+        created_at: new Date().toISOString()
+      });
+    }
+  }
+
+  if (!rows.length) return 0;
+
+  await supabase("gbp_search_keywords?on_conflict=location_id,month,search_term", {
+    method: "POST",
+    headers: {
+      Prefer: "resolution=merge-duplicates,return=representation"
+    },
+    body: JSON.stringify(rows)
+  });
+
+  return rows.length;
+}
+
+async function fetchKeywordMonth({ accessToken, googleLocationId, monthDate }) {
+  const params = new URLSearchParams();
+  const year = String(monthDate.getUTCFullYear());
+  const month = String(monthDate.getUTCMonth() + 1);
+  params.set("monthlyRange.start_month.year", year);
+  params.set("monthlyRange.start_month.month", month);
+  params.set("monthlyRange.end_month.year", year);
+  params.set("monthlyRange.end_month.month", month);
+  params.set("pageSize", "100");
+
+  const allItems = [];
+  do {
+    const data = await googleFetch(
+      `https://businessprofileperformance.googleapis.com/v1/locations/${googleLocationId}/searchkeywords/impressions/monthly?${params.toString()}`,
+      accessToken
+    );
+    allItems.push(...(data.searchKeywordsCounts || []));
+    if (data.nextPageToken) {
+      params.set("pageToken", data.nextPageToken);
+    } else {
+      params.delete("pageToken");
+    }
+  } while (params.has("pageToken"));
+
+  return allItems;
+}
+
+function getKeywordMonths() {
+  const end = new Date();
+  const months = [];
+  for (let offset = 0; offset < 18; offset += 1) {
+    months.push(new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() - offset, 1)));
+  }
+  return months;
+}
+
+function parseInsightsValue(insightsValue) {
+  const raw = insightsValue?.value ?? insightsValue?.threshold ?? 0;
+  if (typeof raw === "number") return raw;
+  const match = String(raw).match(/\d+/);
+  return match ? Number(match[0]) : 0;
+}
+
+function isBrandSearch(searchTerm) {
+  const normalized = String(searchTerm || "").toLowerCase();
+  return BRAND_TERMS.some(term => normalized.includes(term));
+}
+
+function googleMonthToIso(month) {
+  if (!month) return null;
+  if (typeof month === "string") return `${month.slice(0, 7)}-01`;
+  const year = month.year;
+  const monthNumber = month.month;
+  if (!year || !monthNumber) return null;
+  return `${year}-${String(monthNumber).padStart(2, "0")}-01`;
 }
 
 async function rebuildDashboardMetrics() {
