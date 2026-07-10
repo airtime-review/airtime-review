@@ -96,7 +96,7 @@ async function loadLiveData() {
     supabaseConfig = await loadRuntimeConfig();
     const [reviewRows, metricRows, performanceRows, invitees, campaigns, forms, qrCodes, locations, connections, autoResponses, socialProof, appSettings, searchKeywords, reviewRequestsSent, helpArticles] = await Promise.all([
       supabaseRest("reviews?select=*&order=review_time.desc"),
-      supabaseRest("dashboard_metrics?select=*&limit=1"),
+      supabaseRest("dashboard_metrics?select=*&order=updated_at.desc&limit=1"),
       supabaseRest("gbp_daily_metrics?select=*&order=metric_date.desc"),
       safeSupabaseRest("invitees?select=*&order=created_at.desc"),
       safeSupabaseRest("campaigns?select=*&order=created_at.desc"),
