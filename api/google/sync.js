@@ -140,10 +140,13 @@ async function syncPerformance({ accessToken, googleLocationId, internalLocation
 
   if (!rows.length) return 0;
 
-  await supabase("gbp_daily_metrics", {
-    method: "POST",
-    body: JSON.stringify(rows)
-  });
+await supabase("gbp_daily_metrics?on_conflict=location_id,metric_date,metric_name", {
+  method: "POST",
+  headers: {
+    Prefer: "resolution=merge-duplicates,return=representation"
+  },
+  body: JSON.stringify(rows)
+});
 
   return rows.length;
 }
